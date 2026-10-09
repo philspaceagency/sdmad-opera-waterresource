@@ -65,27 +65,14 @@ def make_scene(vv_lin, vh_lin, day, matched, occurrence, cfg: DatasetConfig):
 
 # ---------------------------------------------------------------------------------------- one site
 def iter_s1(site, cfg: DatasetConfig, log=print):
-    """(grid, generator of (solar day, vv_lin, vh_lin)) from Planetary Computer for the site, restricted to the
-    dataset window. Only one orbit; days whose JRC month is outside coverage are not even read."""
-    acquire.set_stac_cache(cfg.cache_dir)
-    start, end = max(pd.Timestamp(cfg.start), jrc.JRC_FIRST), min(pd.Timestamp(cfg.end), jrc.JRC_LAST + pd.offsets.MonthEnd(0))
-    items = acquire.search_s1(site.bbox, start.strftime("%Y-%m-%d"), end.strftime("%Y-%m-%d"))
-    key, items = acquire.choose_orbit(items, site.bbox, cfg.water.min_orbit_cover)
-    if not items:
-        raise RuntimeError(f"{site.name}: no Sentinel-1 RTC pass fully covers the site in {start.date()}..{end.date()}")
-    log(f"[{site.name}] orbit {key}: {len(items)} items on {len(acquire.group_by_day(items))} days")
-    gb = acquire.make_geobox(site.bbox, site.crs, cfg.water.resolution_m)
-    lon = 0.5 * (site.bbox[0] + site.bbox[2])
-
-    def gen():
-        for day, its in sorted(acquire.group_by_day(items).items()):
-            loaded = acquire.load_s1(its, gb, "nearest" if cfg.water.resolution_m <= 10 else "average", log=log)
-            if loaded is None:
-                continue
-            times, vv, vh = loaded
-            for k in range(len(times)):
-                yield acquire.solar_dates([times[k]], lon)[0], vv[k], vh[k]
-    return jrc.grid_from_geobox(gb), gen()
+    """(jrc grid, generator of (solar day, vv_lin, vh_lin)) from Planetary Computer for the site, restricted to the dataset
+    window and to JRC's coverage. Only one orbit; days whose JRC month is outside coverage are not even read."""
+    start = max(pd.Timestamp(cfg.start), jrc.JRC_FIRST)
+    end = min(pd.Timestamp(cfg.end), jrc.JRC_LAST + pd.offsets.MonthEnd(0))
+    log(f"[{site.name}] {start.date()}..{end.date()}")
+    gb, gen = acquire.iter_scenes(site.bbox, site.crs, cfg.water.resolution_m, start, end,
+                                  cfg.water.min_orbit_cover, cfg.cache_dir, log)
+    return jrc.grid_from_geobox(gb), gen
 
 
 def build_site(site, cfg: DatasetConfig, scenes, grid, jrc_source, log=print):

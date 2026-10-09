@@ -57,3 +57,47 @@ def test_patches_ignore_uncertain_and_split_by_block():
     tr, va = pl.spatial_split(corners, (512, 512), size=128, val_frac=0.25)
     assert tr and va and not set(tr) & set(va)
     assert max(corners[i][1] + 128 for i in tr) <= 384 <= min(corners[i][1] for i in va) + 128
+
+
+# ------------------------------------------------------------------ iter_scenes / iter_s1 wiring (I/O mocked)
+def _patch_io(monkeypatch, items):
+    calls = {}
+    monkeypatch.setattr(acquire, "set_stac_cache", lambda d: calls.setdefault("cache", d))
+    monkeypatch.setattr(acquire, "search_s1", lambda bbox, s, e: calls.setdefault("window", (s, e)) and items)
+    monkeypatch.setattr(acquire, "make_geobox", lambda bbox, crs, res: SimpleNamespace(
+        shape=(4, 5), transform=SimpleNamespace(a=res, c=300000.0, f=1650000.0), crs=crs))
+
+    def load(its, gb, resampling, log=None):
+        calls.setdefault("loaded", []).append(sorted(str(i.datetime.date()) for i in its))
+        t = np.array([np.datetime64(i.datetime.replace(tzinfo=None), "ns") for i in its])
+        return t, np.ones((len(its), 4, 5), np.float32), np.full((len(its), 4, 5), 0.1, np.float32)
+    monkeypatch.setattr(acquire, "load_s1", load)
+    return calls
+
+
+def test_iter_scenes_streams_one_orbit_lazily_with_solar_days(monkeypatch):
+    items = [_item(61, "ascending", (2019, 3, 5, 10)), _item(61, "ascending", (2019, 3, 17, 22)),
+             _item(112, "descending", (2019, 3, 8, 22))]            # a second, less frequent orbit is not used
+    calls = _patch_io(monkeypatch, items)
+    gb, gen = acquire.iter_scenes(BBOX, "EPSG:32651", 10.0, "2019-03-01", "2019-03-31", cache_dir="c", log=lambda *_: None)
+    assert "loaded" not in calls                                    # nothing is read until iterated
+    out = list(gen)
+    assert [str(d) for d, _, _ in out] == ["2019-03-05", "2019-03-18"]    # 22:00 UTC pass -> next local day
+    assert out[0][1].shape == (4, 5) and calls["window"] == ("2019-03-01", "2019-03-31") and calls["cache"] == "c"
+    assert all("2019-03-08" not in c for c in calls["loaded"])
+
+
+def test_iter_scenes_without_a_covering_pass_raises(monkeypatch):
+    _patch_io(monkeypatch, [])
+    with pytest.raises(RuntimeError, match="no Sentinel-1 RTC pass"):
+        acquire.iter_scenes(BBOX, "EPSG:32651", 10.0, "2019-03-01", "2019-03-31", log=lambda *_: None)
+
+
+def test_dataset_iter_s1_clamps_the_window_to_jrc_coverage(monkeypatch):
+    from angat_water import dataset, sites
+    calls = _patch_io(monkeypatch, [_item(61, "ascending", (2021, 12, 20, 10))])
+    cfg = dataset.DatasetConfig(start="2016-01-01", end="2023-12-31")
+    grid, gen = dataset.iter_s1(sites.get("angat"), cfg, log=lambda *_: None)
+    assert calls["window"] == ("2016-01-01", "2021-12-31")        # end clamped to JRC's last month, start kept
+    assert grid.nx == 5 and grid.ny == 4 and grid.res == 10.0
+    assert len(list(gen)) == 1

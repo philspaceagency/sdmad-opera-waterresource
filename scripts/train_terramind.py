@@ -42,13 +42,13 @@ def train_on_dataset(a):
         print("WARNING: no validation patches; the best epoch is chosen by training loss (optimistic).")
     model = tm.TerraMindWater(a.backbone, pretrained=not a.no_pretrained, unfreeze_last=a.unfreeze_last)
     tm.train(model, X, Y, tr, va, epochs=a.epochs, batch=a.batch, lr=a.lr)
-    import torch
     os.makedirs(a.out, exist_ok=True)
-    torch.save(model.state_dict(), os.path.join(a.out, "terramind_water.pt"))
+    tm.save_checkpoint(model, os.path.join(a.out, "terramind_water.pt"), {"dataset": a.dataset, "sites": sites})
     if va:
         per = {}
         for s in sorted({metas[i]["site"] for i in va}):
             idx = [i for i in va if metas[i]["site"] == s]
+            import torch
             per[s] = tm.evaluate(model, torch.from_numpy(X), torch.from_numpy(Y.astype(np.int64)), idx)
         print("validation IoU(water) per site:", {k: round(v, 4) for k, v in per.items()})
 
@@ -94,8 +94,7 @@ def main():
 
     model = tm.TerraMindWater(a.backbone, pretrained=not a.no_pretrained, unfreeze_last=a.unfreeze_last)
     tm.train(model, X, Y, tr, va, epochs=a.epochs, batch=a.batch, lr=a.lr)
-    import torch
-    torch.save(model.state_dict(), os.path.join(a.out, "terramind_water.pt"))
+    tm.save_checkpoint(model, os.path.join(a.out, "terramind_water.pt"), {"labels": "otsu"})
 
     import rasterio
     for r in meta["scenes"]:

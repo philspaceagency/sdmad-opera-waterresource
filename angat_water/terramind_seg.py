@@ -40,6 +40,7 @@ class TerraMindWater(nn.Module):
     def __init__(self, backbone="terramind_v1_base", pretrained=True, freeze_backbone=True, unfreeze_last=0,
                  width=128, n_classes=2, ckpt_path=None):
         super().__init__()
+        self.backbone_name, self.width, self.n_classes = backbone, width, n_classes
         from terratorch.registry import BACKBONE_REGISTRY
         kw = {"ckpt_path": ckpt_path} if ckpt_path else {}
         self.enc = BACKBONE_REGISTRY.build(backbone, modalities=[MODALITY], pretrained=pretrained and not ckpt_path, **kw)
@@ -82,6 +83,22 @@ class TerraMindWater(nn.Module):
             t = feats[i].transpose(1, 2).reshape(b, -1, gh, gw)
             maps.append(F.interpolate(proj(t), size=(h, w), mode="bilinear", align_corners=False))
         return self.head(torch.cat(maps + [self.stem(x)], dim=1))
+
+
+# ---------------------------------------------------------------------------------------- checkpoints
+def save_checkpoint(model, path, meta=None):
+    """Weights + what is needed to rebuild the model (backbone name, decoder width) + free-form `meta`."""
+    torch.save({"backbone": model.backbone_name, "width": model.width, "n_classes": model.n_classes,
+                "state_dict": model.state_dict(), "meta": meta or {}}, path)
+
+
+def load_checkpoint(path, device="cpu"):
+    """Rebuild a TerraMindWater from `save_checkpoint` WITHOUT downloading the pretrained backbone weights (they are
+    inside the checkpoint). Returns (model in eval mode, meta)."""
+    ck = torch.load(path, map_location=device, weights_only=False)
+    model = TerraMindWater(ck["backbone"], pretrained=False, width=ck["width"], n_classes=ck["n_classes"])
+    model.load_state_dict(ck["state_dict"])
+    return model.to(device).eval(), ck.get("meta", {})
 
 
 # ---------------------------------------------------------------------------------------- training
