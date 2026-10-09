@@ -194,15 +194,24 @@ def test_split_by_holdout_site_and_by_block():
 
 
 # ------------------------------------------------------------------ Earth Engine request plumbing
-def test_gee_blocks_cover_the_grid_with_correct_offsets():
+def fake_ee(monthly_bands=("water",), occurrence_bands=("occurrence",), compute=None):
+    """A mocked `ee` whose band names behave like the real assets (MonthlyHistory: `water`; GlobalSurfaceWater: `occurrence`)."""
     ee = MagicMock()
+    ee.ImageCollection.return_value.first.return_value.bandNames.return_value.getInfo.return_value = list(monthly_bands)
+    ee.Image.return_value.bandNames.return_value.getInfo.return_value = list(occurrence_bands)
+    if compute is not None:
+        ee.data.computePixels.side_effect = compute
+    return ee
+
+
+def test_gee_blocks_cover_the_grid_with_correct_offsets():
     sent = []
 
     def compute(req):
         g = req["grid"]
         sent.append((g["dimensions"]["height"], g["affineTransform"]["translateY"], g["crsCode"]))
-        return {"waterClass": np.full((g["dimensions"]["height"], g["dimensions"]["width"]), 2, np.uint8)}
-    ee.data.computePixels.side_effect = compute
+        return {"water": np.full((g["dimensions"]["height"], g["dimensions"]["width"]), 2, np.uint8)}
+    ee = fake_ee(compute=compute)
     g = jrc.Grid("EPSG:32651", 10.0, 300000.0, 1650000.0, 1000, 1000)
     arr = jrc.GeeJrc(ee_module=ee, max_request_mb=0.4).month("2019-07-15", g)     # 400 rows of 1000 B per block
     assert arr.shape == (1000, 1000) and (arr == 2).all()
@@ -211,25 +220,109 @@ def test_gee_blocks_cover_the_grid_with_correct_offsets():
     assert {c for _, _, c in sent} == {"EPSG:32651"}
     ee.ImageCollection.assert_called_with(jrc.MONTHLY_ASSET)
     ee.ImageCollection.return_value.filterDate.assert_called_with("2019-07-01", "2019-08-01")   # the S1 month only
+    ee.ImageCollection.return_value.filterDate.return_value.select.assert_called_with("water")  # the real band name
+
+
+def test_gee_monthly_band_is_read_from_the_asset_and_waterclass_is_a_fallback():
+    seen = []
+
+    def compute(req):
+        seen.append(req["expression"])
+        return {"waterClass": np.ones((1, 3), np.uint8)}
+    ee = fake_ee(monthly_bands=("waterClass",), compute=compute)
+    g = jrc.Grid("EPSG:32651", 10.0, 0.0, 10.0, 3, 1)
+    jrc.GeeJrc(ee_module=ee).month("2019-07-01", g)
+    ee.ImageCollection.return_value.filterDate.return_value.select.assert_called_with("waterClass")
+
+
+def test_gee_unknown_bands_fail_with_the_list_of_real_ones():
+    ee = fake_ee(monthly_bands=("something_else", "other"))
+    g = jrc.Grid("EPSG:32651", 10.0, 0.0, 10.0, 3, 1)
+    with pytest.raises(RuntimeError, match=r"has bands \['something_else', 'other'\].*expected"):
+        jrc.GeeJrc(ee_module=ee).month("2019-07-01", g)
+    ee.data.computePixels.assert_not_called()
+
+
+def test_gee_band_lookup_is_asked_once_per_asset():
+    ee = fake_ee(compute=lambda req: {"water": np.ones((1, 3), np.uint8)})
+    g = jrc.Grid("EPSG:32651", 10.0, 0.0, 10.0, 3, 1)
+    src = jrc.GeeJrc(ee_module=ee)
+    src.month("2019-05-01", g)
+    src.month("2019-06-01", g)
+    assert ee.ImageCollection.return_value.first.return_value.bandNames.return_value.getInfo.call_count == 1
 
 
 def test_gee_occurrence_marks_unobserved_as_nan():
-    ee = MagicMock()
-    ee.data.computePixels.side_effect = lambda req: {"occurrence": np.array([[-1, 0, 100]], np.float32)}
+    ee = fake_ee(compute=lambda req: {"occurrence": np.array([[-1, 0, 100]], np.float32)})
     g = jrc.Grid("EPSG:32651", 10.0, 0.0, 10.0, 3, 1)
     occ = jrc.GeeJrc(ee_module=ee).occurrence(g)
     assert np.isnan(occ[0, 0]) and occ[0, 1] == 0 and occ[0, 2] == 100
 
 
-def test_gee_retries_then_raises():
-    ee = MagicMock()
-    ee.data.computePixels.side_effect = RuntimeError("quota")
+def test_gee_transient_errors_are_retried_then_raised(monkeypatch):
+    monkeypatch.setattr(jrc._time, "sleep", lambda s: None)
+    ee = fake_ee()
+    ee.data.computePixels.side_effect = RuntimeError("Too many concurrent requests: quota")
     g = jrc.Grid("EPSG:32651", 10.0, 0.0, 10.0, 3, 1)
-    with pytest.raises(RuntimeError, match="failed after 2 tries"):
-        jrc.GeeJrc(ee_module=ee, tries=2).month("2019-07-01", g)
+    with pytest.raises(RuntimeError, match="failed after 3 tries"):
+        jrc.GeeJrc(ee_module=ee, tries=3).month("2019-07-01", g)
+    assert ee.data.computePixels.call_count == 3
+
+
+def test_gee_rejected_requests_are_not_retried(monkeypatch):
+    monkeypatch.setattr(jrc._time, "sleep", lambda s: pytest.fail("must not back off on a request EE rejects"))
+    ee = fake_ee()
+    ee.data.computePixels.side_effect = RuntimeError("Image.select: Band pattern 'x' did not match any bands. Available bands: [water]")
+    g = jrc.Grid("EPSG:32651", 10.0, 0.0, 10.0, 3, 1)
+    with pytest.raises(RuntimeError, match="rejected the request.*did not match any bands"):
+        jrc.GeeJrc(ee_module=ee, tries=5).month("2019-07-01", g)
+    assert ee.data.computePixels.call_count == 1
+
+
+def test_transient_classifier():
+    t = jrc._is_transient
+    assert t(RuntimeError("Earth Engine memory capacity exceeded")) is False
+    assert all(t(RuntimeError(m)) for m in ("HTTP 503 Service Unavailable", "Read timed out", "Too many requests", "quota exceeded",
+                                            "Connection reset by peer", "429"))
+    assert not t(RuntimeError("ImageCollection.mosaic: Error in map(ID=2018_01): Image.select: Band pattern 'waterClass' "
+                              "did not match any bands. Available bands: [water]"))
 
 
 def test_site_registry():
     assert sites.get("Angat").name == "angat" and sites.get("magat").bbox[0] < sites.get("magat").bbox[2]
     with pytest.raises(KeyError):
         sites.get("nowhere")
+
+
+# ------------------------------------------------------------------ failure messages (empty / all-rejected manifests)
+def test_manifest_table_explains_an_empty_or_missing_manifest(tmp_path):
+    with pytest.raises(RuntimeError, match="does not exist"):
+        dataset.manifest_table(str(tmp_path))
+    (tmp_path / "manifest.jsonl").write_text("")
+    with pytest.raises(RuntimeError, match="is empty.*no scenes"):
+        dataset.manifest_table(str(tmp_path))
+
+
+def test_manifest_table_explains_when_every_scene_was_rejected(tmp_path):
+    rows = [{"site": "angat", "date": "2019-05-12", "usable": False, "reject_reason": "low_agreement",
+             "labels": {"agreement": 0.7, "water_px": 10, "jrc_nodata_frac": 0.0}},
+            {"site": "angat", "date": "2019-06-12", "usable": False, "reject_reason": "no_jrc_month"}]
+    (tmp_path / "manifest.jsonl").write_text("\n".join(json.dumps(r) for r in rows))
+    with pytest.raises(RuntimeError, match=r"all 2 scenes were rejected.*low_agreement.*max_month_offset"):
+        dataset.manifest_table(str(tmp_path))
+
+
+def test_manifest_table_has_the_columns_the_notebook_groups_by(tmp_path):
+    cfg = dataset.DatasetConfig(out_dir=str(tmp_path), water=pipeline.WaterConfig(min_area_px=50, fill_holes_px=50))
+    sc = syn.make_scene(shape=(384, 384), water_frac=0.2, looks=4, seed=11)
+    dataset.build_site(sites.Site("testsite", (121.0, 15.0, 121.1, 15.1)), cfg, iter([("2019-05-12", sc["vv"], sc["vh"])]),
+                       GRID, FakeJrc({"2019-05": sc["truth"]}), log=lambda *_: None)
+    tbl = dataset.manifest_table(str(tmp_path))
+    assert list(tbl.groupby("site")["usable"].sum()) == [1] and {"agreement", "water_km2", "reject_reason"} <= set(tbl)
+
+
+def test_build_site_warns_when_no_scene_was_read(tmp_path):
+    logs = []
+    cfg = dataset.DatasetConfig(out_dir=str(tmp_path))
+    out = dataset.build_site(sites.Site("testsite", (121.0, 15.0, 121.1, 15.1)), cfg, iter([]), GRID, FakeJrc({}), log=logs.append)
+    assert out == [] and any("WARNING" in m and "no Sentinel-1 scene was read" in m for m in logs)
