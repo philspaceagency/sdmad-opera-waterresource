@@ -36,6 +36,11 @@ or numpy was imported before the install, use Runtime > Restart session and run 
 (`ROOT = Path("/content/drive/MyDrive/Surface_Water/project")`, Drive is mounted if needed): edit that one line if your copy lives elsewhere. The same pin is safe elsewhere: the tests
 pass on numpy 2.2.6 as well as on 2.5.
 
+**If the dataset table cell fails** (`manifest.jsonl is empty` / `all N scenes were rejected` / `does not exist`), the message names the likely
+cause. Empty means the dataset step read no Sentinel-1 scene: look for `unreadable` lines or a Planetary Computer token / rate-limit error in
+that cell's output (set `PC_SDK_SUBSCRIPTION_KEY`), and check the dates and site box. All rejected means JRC and Otsu did not agree on any scene
+(`low_agreement`: try `MAX_MONTH_OFFSET = 1`), or JRC had no coverage (`no_jrc_month`, `jrc_nodata`); the table above the error shows each scene's reason.
+
 **Scripts:**
 
 ```bash

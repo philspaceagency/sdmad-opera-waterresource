@@ -100,6 +100,9 @@ def build_site(site, cfg: DatasetConfig, scenes, grid, jrc_source, log=print):
             man.write(json.dumps(meta, default=str) + "\n")
             man.flush()
             metas.append(meta)
+    if not metas:
+        log(f"WARNING [{site.name}]: no Sentinel-1 scene was read, so nothing was labelled. Look above for 'unreadable' "
+            "lines or an error from Planetary Computer (token / rate limit), and check the dates and the site box.")
     return metas
 
 
@@ -107,6 +110,34 @@ def build_site(site, cfg: DatasetConfig, scenes, grid, jrc_source, log=print):
 def read_manifest(out_dir):
     with open(os.path.join(out_dir, "manifest.jsonl")) as fh:
         return [json.loads(line) for line in fh if line.strip()]
+
+
+def manifest_table(out_dir, res_m=10.0):
+    """The manifest as a pandas DataFrame (one row per scene: site, date, JRC month, offset, agreement, water km2, JRC no-data,
+    usable, reject_reason). Raises RuntimeError with the likely cause if there is nothing to show or nothing is usable."""
+    path = os.path.join(out_dir, "manifest.jsonl")
+    if not os.path.exists(path):
+        raise RuntimeError(f"{path} does not exist: run the dataset-building step first (and check it finished).")
+    man = read_manifest(out_dir)
+    if not man:
+        raise RuntimeError(
+            f"{path} is empty: the dataset step labelled no scenes. Typical causes: no Sentinel-1 scene could be read "
+            "(Planetary Computer token / rate limit: set PC_SDK_SUBSCRIPTION_KEY), the dataset cell stopped with an error "
+            "earlier and was not re-run, or the dates / site box contain no pass. Read the output of the dataset cell.")
+    tbl = pd.DataFrame([{
+        "site": m.get("site"), "date": m["date"], "jrc_month": m.get("jrc_month"), "offset": m.get("month_offset"),
+        "agreement": m.get("labels", {}).get("agreement"),
+        "water_km2": (m["labels"]["water_px"] * res_m ** 2 / 1e6) if "labels" in m else None,
+        "jrc_nodata": m.get("labels", {}).get("jrc_nodata_frac"), "usable": bool(m.get("usable")),
+        "reject_reason": m.get("reject_reason")} for m in man])
+    if not tbl["usable"].any():
+        reasons = tbl["reject_reason"].value_counts().to_dict()
+        raise RuntimeError(
+            f"all {len(tbl)} scenes were rejected {reasons}. low_agreement: the JRC month does not match the pass "
+            "(try max_month_offset=1) or Otsu failed on the scene; no_jrc_month: Landsat cloud gaps that month; "
+            "jrc_nodata: too little JRC coverage; few_water_px: no water body in the scene. Lower min_agreement only "
+            "after looking at the scenes.")
+    return tbl
 
 
 def load_patches(out_dir, size=224, stride=112, sites=None, min_labelled=0.5, min_water=0.005, keep_empty=0.2,

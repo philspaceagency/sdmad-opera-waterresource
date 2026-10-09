@@ -268,11 +268,16 @@ def iter_scenes(bbox, crs, resolution_m, start, end, min_cover=0.9, cache_dir=No
     lon = 0.5 * (bbox[0] + bbox[2])
 
     def gen():
-        for _, its in sorted(days.items()):
+        n_scenes, n_skipped = 0, 0
+        for day, its in sorted(days.items()):
             loaded = load_s1(its, gb, "nearest" if resolution_m <= 10 else "average", log=log)
             if loaded is None:
+                n_skipped += 1
+                log(f"  {day}: no pixels could be read from {len(its)} item(s), skipped")
                 continue
             times, vv, vh = loaded
             for k in range(len(times)):
+                n_scenes += 1
                 yield solar_dates([times[k]], lon)[0], vv[k], vh[k]
+        log(f"read {n_scenes} scene(s) from {len(days)} day(s)" + (f", {n_skipped} day(s) unreadable" if n_skipped else ""))
     return gb, gen()

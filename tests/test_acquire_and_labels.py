@@ -101,3 +101,18 @@ def test_dataset_iter_s1_clamps_the_window_to_jrc_coverage(monkeypatch):
     assert calls["window"] == ("2016-01-01", "2021-12-31")        # end clamped to JRC's last month, start kept
     assert grid.nx == 5 and grid.ny == 4 and grid.res == 10.0
     assert len(list(gen)) == 1
+
+
+def test_iter_scenes_reports_unreadable_days_and_the_final_tally(monkeypatch):
+    items = [_item(61, "ascending", (2019, 3, 5, 10)), _item(61, "ascending", (2019, 3, 17, 10))]
+    _patch_io(monkeypatch, items)
+    good = acquire.load_s1
+
+    def flaky(its, gb, resampling, log=None):
+        return None if its[0].datetime.day == 5 else good(its, gb, resampling, log)
+    monkeypatch.setattr(acquire, "load_s1", flaky)
+    logs = []
+    _, gen = acquire.iter_scenes(BBOX, "EPSG:32651", 10.0, "2019-03-01", "2019-03-31", log=logs.append)
+    assert len(list(gen)) == 1
+    assert any("2019-03-05" in m and "skipped" in m for m in logs)
+    assert any("read 1 scene(s) from 2 day(s), 1 day(s) unreadable" in m for m in logs)
