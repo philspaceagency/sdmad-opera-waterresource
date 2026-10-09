@@ -42,7 +42,7 @@ def jrc_otsu_labels(classes, jrc_class, occurrence=None, edge_px=3, resolve_unce
     """Returns (labels uint8 [0 land, 1 water, 255 ignore], source uint8, stats dict).
 
     classes   : Otsu classes (otsu.CLASS_*), same grid
-    jrc_class : JRC monthly waterClass on the same grid (0 no data, 1 not water, 2 water)
+    jrc_class : JRC monthly water class (band `water`) on the same grid (0 no data, 1 not water, 2 water)
     occurrence: JRC occurrence 0-100 (NaN = unobserved), only used by `never_water_negatives`
     edge_px   : width (S1 pixels) of the ignore/Otsu band around the JRC shoreline; 3 px = 30 m = one Landsat pixel
     """

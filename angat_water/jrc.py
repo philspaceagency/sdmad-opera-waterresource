@@ -1,6 +1,6 @@
 """JRC Global Surface Water from Google Earth Engine, read onto the Sentinel-1 grid and matched to the S1 date.
 
-  * `JRC/GSW1_4/MonthlyHistory`  waterClass per calendar month: 0 no data, 1 not water, 2 water (Landsat, 30 m).
+  * `JRC/GSW1_4/MonthlyHistory`  band `water` per calendar month: 0 no data, 1 not water, 2 water (Landsat, 30 m).
   * `JRC/GSW1_4/GlobalSurfaceWater` occurrence 0-100 % over 1984-2021.
 
 Temporal matching: the JRC product is monthly, so the finest possible match to a Sentinel-1 acquisition is the
@@ -14,6 +14,7 @@ sources, e.g. a local raster) can stand in for it: anything with `.month(month, 
 """
 from __future__ import annotations
 
+import re
 import time as _time
 from dataclasses import dataclass
 
@@ -25,6 +26,18 @@ OCCURRENCE_ASSET = "JRC/GSW1_4/GlobalSurfaceWater"
 JRC_FIRST = pd.Timestamp("1984-03-01")
 JRC_LAST = pd.Timestamp("2021-12-01")          # last monthly image in GSW1_4
 NODATA, NOT_WATER, WATER = 0, 1, 2
+# Band names are read from Earth Engine and matched against these (first hit wins), so a wrong guess fails with the list of
+# real bands instead of a bare EEException. GSW1_4 MonthlyHistory has `water`; `waterClass` is the YearlyHistory name.
+MONTHLY_BANDS = ("water", "waterClass")
+OCCURRENCE_BANDS = ("occurrence",)
+_TRANSIENT = re.compile(r"\b(quota|too many|rate limit|timed out|timeout|deadline|unavailable|internal error|50[0234]|429|"
+                        r"connection|reset by peer|temporar\w+)\b", re.I)
+
+
+def _is_transient(e):
+    """Worth retrying: quota, timeouts, 5xx, connection trouble. A request Earth Engine rejects (missing band, bad asset id,
+    malformed expression) fails identically every time and is raised at once."""
+    return bool(_TRANSIENT.search(f"{e.__class__.__name__} {e}"))
 
 
 @dataclass(frozen=True)
@@ -64,6 +77,7 @@ class GeeJrc:
         self._ee = ee_module
         self.monthly_asset, self.occurrence_asset = monthly_asset, occurrence_asset
         self.max_request_mb, self.tries = max_request_mb, tries
+        self._bands = {}
 
     @property
     def ee(self):
@@ -74,21 +88,34 @@ class GeeJrc:
 
     # -- public
     def month(self, month, grid):
-        """(ny, nx) uint8 waterClass for the calendar month containing `month` (0 = no data)."""
+        """(ny, nx) uint8 water class (0 no data, 1 not water, 2 water) for the calendar month containing `month`."""
         ee = self.ee
+        band = self._band(self.monthly_asset, ee.ImageCollection(self.monthly_asset).first(), MONTHLY_BANDS)
         start = pd.Timestamp(month).to_period("M").start_time
         end = start + pd.offsets.MonthBegin(1)
         col = ee.ImageCollection(self.monthly_asset).filterDate(start.strftime("%Y-%m-%d"), end.strftime("%Y-%m-%d"))
-        img = col.select("waterClass").mosaic().unmask(0).toUint8()
-        return self._compute(img, grid, "waterClass", np.uint8)
+        img = col.select(band).mosaic().unmask(0).toUint8()
+        return self._compute(img, grid, band, np.uint8)
 
     def occurrence(self, grid):
         """(ny, nx) float32 occurrence 0-100; NaN where JRC has no observation."""
         ee = self.ee
-        img = ee.Image(self.occurrence_asset).select("occurrence").unmask(-1).toFloat()
-        a = self._compute(img, grid, "occurrence", np.float32)
+        band = self._band(self.occurrence_asset, ee.Image(self.occurrence_asset), OCCURRENCE_BANDS)
+        img = ee.Image(self.occurrence_asset).select(band).unmask(-1).toFloat()
+        a = self._compute(img, grid, band, np.float32)
         a[a < 0] = np.nan
         return a
+
+    def _band(self, asset, image, candidates):
+        """The band of `asset` to use: the first of `candidates` that exists. Asks Earth Engine once per asset (cached)."""
+        if asset not in self._bands:
+            names = list(image.bandNames().getInfo())
+            hit = next((c for c in candidates if c in names), None)
+            if hit is None:
+                raise RuntimeError(f"{asset} has bands {names}, none of the expected {list(candidates)}: "
+                                   "set GeeJrc's asset (or the *_BANDS constants in jrc.py) to match.")
+            self._bands[asset] = hit
+        return self._bands[asset]
 
     # -- request plumbing
     def _compute(self, image, grid, name, dtype):
@@ -110,8 +137,10 @@ class GeeJrc:
         for k in range(self.tries):
             try:
                 return np.asarray(self.ee.data.computePixels(req)[name])
-            except Exception as e:                                  # quota, timeout, transient
-                last = e
+            except Exception as e:
+                if not _is_transient(e):                            # rejected request: retrying cannot help
+                    raise RuntimeError(f"Earth Engine rejected the request: {e!r}") from e
+                last = e                                            # quota, timeout, 5xx: back off and retry
                 if k < self.tries - 1:
                     _time.sleep(min(30, 2 ** k))
         raise RuntimeError(f"Earth Engine request failed after {self.tries} tries: {last!r}")
