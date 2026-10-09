@@ -1,10 +1,15 @@
-"""Fine-tune TerraMind on Otsu pseudo-labels of Angat, then fuse model + Otsu for every scene.
+"""Fine-tune TerraMind, then fuse model + Otsu for every scene.
 
-    python scripts/run_angat.py --start 2024-01-01 --end 2024-12-31 --out outputs/angat     # needs network
-    python scripts/train_terramind.py --out outputs/angat --backbone terramind_v1_base
+Two label sources:
 
-Training scenes: only those where edge- and binary-Otsu agree (pseudo_labels.scene_ok). Validation is a spatial
-block (east strip) so overlapping patches never straddle train/val.
+  JRC-matched dataset (recommended; several sites; see scripts/build_dataset.py)
+      python scripts/train_terramind.py --dataset outputs/dataset --holdout-sites magat
+
+  Otsu-only pseudo-labels of one site (output of scripts/run_angat.py)
+      python scripts/train_terramind.py --out outputs/angat --backbone terramind_v1_base
+
+Validation: whole held-out sites (--holdout-sites; the honest generalisation test) or, without them, an east-strip block
+of every scene so overlapping patches never straddle train/val.
 """
 import argparse
 import json
@@ -24,9 +29,36 @@ def _read(path):
         return r.read(1), r.profile
 
 
+def train_on_dataset(a):
+    from angat_water import dataset
+    X, Y, metas = dataset.load_patches(a.dataset, size=a.patch, stride=a.patch // 2, keep_empty=a.keep_empty)
+    if not len(X):
+        raise SystemExit("no usable patches: check manifest.jsonl for the rejection reasons")
+    tr, va = dataset.split_patches(metas, a.patch, a.holdout_sites)
+    sites = sorted({m["site"] for m in metas})
+    print(f"{len(X)} patches from {sites}: {len(tr)} train / {len(va)} val; water share of labelled "
+          f"{(Y == 1).sum() / max(1, (Y != pl.IGNORE).sum()):.3f}")
+    if not va:
+        print("WARNING: no validation patches; the best epoch is chosen by training loss (optimistic).")
+    model = tm.TerraMindWater(a.backbone, pretrained=not a.no_pretrained, unfreeze_last=a.unfreeze_last)
+    tm.train(model, X, Y, tr, va, epochs=a.epochs, batch=a.batch, lr=a.lr)
+    import torch
+    os.makedirs(a.out, exist_ok=True)
+    torch.save(model.state_dict(), os.path.join(a.out, "terramind_water.pt"))
+    if va:
+        per = {}
+        for s in sorted({metas[i]["site"] for i in va}):
+            idx = [i for i in va if metas[i]["site"] == s]
+            per[s] = tm.evaluate(model, torch.from_numpy(X), torch.from_numpy(Y.astype(np.int64)), idx)
+        print("validation IoU(water) per site:", {k: round(v, 4) for k, v in per.items()})
+
+
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--out", default="outputs/angat")
+    ap.add_argument("--out", default="outputs/angat", help="run_angat output (Otsu-only mode) / where to save the model")
+    ap.add_argument("--dataset", default=None, help="JRC-matched dataset from build_dataset.py (replaces --out labels)")
+    ap.add_argument("--holdout-sites", nargs="*", default=[], help="sites kept out of training and used for validation")
+    ap.add_argument("--keep-empty", type=float, default=0.2, help="share of near-waterless patches kept")
     ap.add_argument("--backbone", default="terramind_v1_base")
     ap.add_argument("--no-pretrained", action="store_true", help="random init (offline smoke test only)")
     ap.add_argument("--epochs", type=int, default=15)
@@ -36,6 +68,8 @@ def main():
     ap.add_argument("--patch", type=int, default=224)
     a = ap.parse_args()
 
+    if a.dataset:
+        return train_on_dataset(a)
     meta = json.load(open(os.path.join(a.out, "thresholds.json")))
     good = [r for r in meta["scenes"] if pl.scene_ok(r)]
     print(f"{len(good)}/{len(meta['scenes'])} scenes qualify as pseudo-label sources")

@@ -12,4 +12,6 @@ odc-stac
 rasterio
 pyproj
 affine
+# JRC labels (Google Earth Engine; run `earthengine authenticate` once)
+earthengine-api
 # optional: TerraMind stage (see requirements-fm.txt)
