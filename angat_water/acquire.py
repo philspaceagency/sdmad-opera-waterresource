@@ -252,3 +252,27 @@ def load_local_stack(vv_paths, vh_paths=None):
             with rasterio.open(vh_paths[i]) as r:
                 vh.append(r.read(1).astype(np.float32))
     return np.stack(vv), (np.stack(vh) if vh else None), profile
+
+
+def iter_scenes(bbox, crs, resolution_m, start, end, min_cover=0.9, cache_dir=None, log=print):
+    """(geobox, generator of (local solar day, vv_lin (h, w), vh_lin (h, w))) for every Sentinel-1 RTC date of ONE orbit
+    that covers the bbox in [start, end]. Scenes are read lazily, one acquisition day at a time."""
+    set_stac_cache(cache_dir)
+    items = search_s1(bbox, str(start)[:10], str(end)[:10])
+    key, items = choose_orbit(items, bbox, min_cover)
+    if not items:
+        raise RuntimeError(f"no Sentinel-1 RTC pass covers {tuple(bbox)} in {str(start)[:10]}..{str(end)[:10]}")
+    days = group_by_day(items)
+    log(f"orbit {key}: {len(items)} items on {len(days)} days")
+    gb = make_geobox(bbox, crs, resolution_m)
+    lon = 0.5 * (bbox[0] + bbox[2])
+
+    def gen():
+        for _, its in sorted(days.items()):
+            loaded = load_s1(its, gb, "nearest" if resolution_m <= 10 else "average", log=log)
+            if loaded is None:
+                continue
+            times, vv, vh = loaded
+            for k in range(len(times)):
+                yield solar_dates([times[k]], lon)[0], vv[k], vh[k]
+    return gb, gen()

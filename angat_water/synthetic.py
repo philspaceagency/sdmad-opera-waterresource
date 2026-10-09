@@ -36,3 +36,34 @@ def iou(pred, truth):
     pred, truth = np.asarray(pred, bool), np.asarray(truth, bool)
     u = (pred | truth).sum()
     return float((pred & truth).sum() / u) if u else 1.0
+
+
+def jrc_month_from_truth(truth, cloud=None, block=3):
+    """What JRC would show for `truth`: majority vote on block x block cells (Landsat 30 m = 3 S1 pixels at 10 m);
+    2 water, 1 not water, 0 no data (`cloud` mask)."""
+    from . import jrc
+    h, w = truth.shape
+    hb, wb = h // block, w // block
+    blk = truth[:hb * block, :wb * block].reshape(hb, block, wb, block).mean((1, 3)) >= 0.5
+    out = np.full(truth.shape, jrc.NOT_WATER, np.uint8)
+    out[:hb * block, :wb * block] = np.where(np.kron(blk, np.ones((block, block), bool)), jrc.WATER, jrc.NOT_WATER)
+    if cloud is not None:
+        out[cloud] = jrc.NODATA
+    return out
+
+
+class SyntheticJrc:
+    """Offline stand-in for jrc.GeeJrc: `truth_by_month` = {"2019-05": bool water mask}. Months not listed are no data."""
+
+    def __init__(self, truth_by_month, cloud=None):
+        self.truth_by_month, self.cloud, self.calls = truth_by_month, cloud, []
+
+    def month(self, month, grid):
+        import pandas as pd
+        key = pd.Timestamp(month).strftime("%Y-%m")
+        self.calls.append(key)
+        t = self.truth_by_month.get(key)
+        return np.zeros((grid.ny, grid.nx), np.uint8) if t is None else jrc_month_from_truth(t, self.cloud)
+
+    def occurrence(self, grid):
+        return np.zeros((grid.ny, grid.nx), np.float32)

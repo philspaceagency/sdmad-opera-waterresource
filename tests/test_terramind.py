@@ -56,3 +56,27 @@ def test_refine_threshold_between_class_means():
     t = tm.refine_threshold(db, prob)
     assert -17 < t < -12
     assert tm.refine_threshold(db, np.full_like(prob, 0.5)) is None
+
+
+# ------------------------------------------------------------------ checkpoints and inference
+def test_checkpoint_roundtrip_rebuilds_without_pretrained_download(model, tmp_path):
+    p = tmp_path / "m.pt"
+    tm.save_checkpoint(model, str(p), {"sites": ["angat"]})
+    m2, meta = tm.load_checkpoint(str(p))
+    assert meta == {"sites": ["angat"]} and m2.backbone_name == "terramind_v1_tiny" and not m2.training
+    x = torch.randn(1, 2, 64, 64)
+    model.eval()
+    with torch.no_grad():
+        assert torch.allclose(model(x), m2(x), atol=1e-5)
+
+
+def test_infer_scene_with_and_without_model(model):
+    from angat_water import infer
+    s = syn.make_scene(shape=(256, 256), water_frac=0.15, seed=4)
+    cfg = pipeline.WaterConfig(min_area_px=50, fill_holes_px=50)
+    base = infer.infer_scene(s["vv"], s["vh"], None, cfg)
+    assert base.prob is None and (base.fused_water == base.otsu_water).all()
+    res = infer.infer_scene(s["vv"], s["vh"], model, cfg, tile=128, overlap=32, device="cpu")
+    assert res.prob.shape == s["vv"].shape and res.flags.shape == s["vv"].shape
+    a = res.area_km2(10.0)
+    assert a["otsu"] > 0 and set(a) == {"otsu", "fused", "model_only_candidates", "otsu_only_candidates"}
