@@ -1,0 +1,2 @@
+torch
+terratorch    # TerraMind backbones (IBM/ESA), pulls pretrained weights from Hugging Face
