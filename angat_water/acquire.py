@@ -254,9 +254,10 @@ def load_local_stack(vv_paths, vh_paths=None):
     return np.stack(vv), (np.stack(vh) if vh else None), profile
 
 
-def iter_scenes(bbox, crs, resolution_m, start, end, min_cover=0.9, cache_dir=None, log=print):
+def iter_scenes(bbox, crs, resolution_m, start, end, min_cover=0.9, cache_dir=None, log=print, skip_days=None):
     """(geobox, generator of (local solar day, vv_lin (h, w), vh_lin (h, w))) for every Sentinel-1 RTC date of ONE orbit
-    that covers the bbox in [start, end]. Scenes are read lazily, one acquisition day at a time."""
+    that covers the bbox in [start, end]. Scenes are read lazily, one acquisition day at a time. `skip_days` (a set of
+    'YYYY-MM-DD' local solar days) are not read at all: this is how an interrupted run resumes."""
     set_stac_cache(cache_dir)
     items = search_s1(bbox, str(start)[:10], str(end)[:10])
     key, items = choose_orbit(items, bbox, min_cover)
@@ -268,8 +269,11 @@ def iter_scenes(bbox, crs, resolution_m, start, end, min_cover=0.9, cache_dir=No
     lon = 0.5 * (bbox[0] + bbox[2])
 
     def gen():
-        n_scenes, n_skipped = 0, 0
+        n_scenes, n_skipped, n_done = 0, 0, 0
         for day, its in sorted(days.items()):
+            if skip_days and str(day) in skip_days:
+                n_done += 1
+                continue
             loaded = load_s1(its, gb, "nearest" if resolution_m <= 10 else "average", log=log)
             if loaded is None:
                 n_skipped += 1
@@ -279,5 +283,6 @@ def iter_scenes(bbox, crs, resolution_m, start, end, min_cover=0.9, cache_dir=No
             for k in range(len(times)):
                 n_scenes += 1
                 yield solar_dates([times[k]], lon)[0], vv[k], vh[k]
-        log(f"read {n_scenes} scene(s) from {len(days)} day(s)" + (f", {n_skipped} day(s) unreadable" if n_skipped else ""))
+        log(f"read {n_scenes} scene(s) from {len(days)} day(s)" + (f", {n_skipped} day(s) unreadable" if n_skipped else "")
+            + (f", {n_done} already done (resumed)" if n_done else ""))
     return gb, gen()

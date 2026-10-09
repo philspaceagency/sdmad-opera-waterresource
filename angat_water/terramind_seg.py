@@ -131,7 +131,7 @@ def train(model, X, Y, train_idx, val_idx, epochs=10, batch=8, lr=3e-4, device=N
         tot = 0.0
         for s in range(0, len(order), batch):
             idx = order[s:s + batch]
-            xb, yb = Xt[idx].to(device), Yt[idx].to(device)
+            xb, yb = Xt[idx].to(device).float(), Yt[idx].to(device)
             if flip and np.random.rand() < 0.5:
                 xb, yb = xb.flip(-1), yb.flip(-1)
             if flip and np.random.rand() < 0.5:
@@ -158,7 +158,7 @@ def evaluate(model, Xt, Yt, idx, batch=8, device="cpu"):
     inter = union = 0
     for s in range(0, len(idx), batch):
         i = idx[s:s + batch]
-        logits = model(Xt[i].to(device))
+        logits = model(Xt[i].to(device).float())
         y = Yt[i].to(device)
         valid = y != pl.IGNORE
         pred, tgt = (logits.argmax(1) == 1) & valid, (y == 1) & valid

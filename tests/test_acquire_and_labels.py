@@ -116,3 +116,15 @@ def test_iter_scenes_reports_unreadable_days_and_the_final_tally(monkeypatch):
     assert len(list(gen)) == 1
     assert any("2019-03-05" in m and "skipped" in m for m in logs)
     assert any("read 1 scene(s) from 2 day(s), 1 day(s) unreadable" in m for m in logs)
+
+
+def test_iter_scenes_resumes_by_not_reading_days_already_done(monkeypatch):
+    items = [_item(61, "ascending", (2019, 3, 5, 10)), _item(61, "ascending", (2019, 3, 17, 22))]
+    calls = _patch_io(monkeypatch, items)
+    logs = []
+    _, gen = acquire.iter_scenes(BBOX, "EPSG:32651", 10.0, "2019-03-01", "2019-03-31", log=logs.append,
+                                 skip_days={"2019-03-05"})
+    out = list(gen)
+    assert [str(d) for d, _, _ in out] == ["2019-03-18"]
+    assert calls["loaded"] == [["2019-03-17"]]                      # the finished day was never read
+    assert any("1 already done (resumed)" in m for m in logs)
