@@ -80,3 +80,12 @@ def test_infer_scene_with_and_without_model(model):
     assert res.prob.shape == s["vv"].shape and res.flags.shape == s["vv"].shape
     a = res.area_km2(10.0)
     assert a["otsu"] > 0 and set(a) == {"otsu", "fused", "model_only_candidates", "otsu_only_candidates"}
+
+
+def test_training_accepts_float16_patches(model):
+    s = syn.make_scene(shape=(256, 256), water_frac=0.2, seed=1)
+    wm = pipeline.map_water(s["vv"], s["vh"], pipeline.WaterConfig(min_area_px=30, fill_holes_px=30))
+    X, Y, C = pl.extract_patches(pl.normalise_s1(wm.db, wm.vh_db), pl.labels_from_classes(wm.classes), size=64, stride=64)
+    X16 = X.astype(np.float16)
+    _, hist = tm.train(model, X16, Y, list(range(len(X) - 2)), [len(X) - 2, len(X) - 1], epochs=2, batch=4, lr=1e-3, device="cpu")
+    assert np.isfinite(hist[-1]["loss"]) and np.isfinite(hist[-1]["val_iou"])

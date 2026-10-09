@@ -64,14 +64,14 @@ def make_scene(vv_lin, vh_lin, day, matched, occurrence, cfg: DatasetConfig):
 
 
 # ---------------------------------------------------------------------------------------- one site
-def iter_s1(site, cfg: DatasetConfig, log=print):
+def iter_s1(site, cfg: DatasetConfig, log=print, skip_days=None):
     """(jrc grid, generator of (solar day, vv_lin, vh_lin)) from Planetary Computer for the site, restricted to the dataset
     window and to JRC's coverage. Only one orbit; days whose JRC month is outside coverage are not even read."""
     start = max(pd.Timestamp(cfg.start), jrc.JRC_FIRST)
     end = min(pd.Timestamp(cfg.end), jrc.JRC_LAST + pd.offsets.MonthEnd(0))
     log(f"[{site.name}] {start.date()}..{end.date()}")
     gb, gen = acquire.iter_scenes(site.bbox, site.crs, cfg.water.resolution_m, start, end,
-                                  cfg.water.min_orbit_cover, cfg.cache_dir, log)
+                                  cfg.water.min_orbit_cover, cfg.cache_dir, log, skip_days)
     return jrc.grid_from_geobox(gb), gen
 
 
@@ -101,12 +101,25 @@ def build_site(site, cfg: DatasetConfig, scenes, grid, jrc_source, log=print):
             man.flush()
             metas.append(meta)
     if not metas:
-        log(f"WARNING [{site.name}]: no Sentinel-1 scene was read, so nothing was labelled. Look above for 'unreadable' "
-            "lines or an error from Planetary Computer (token / rate limit), and check the dates and the site box.")
+        earlier = len(done_days(cfg.out_dir, site.name))
+        if earlier:
+            log(f"[{site.name}] nothing new to label: all {earlier} scene(s) are already in the manifest (resumed run).")
+        else:
+            log(f"WARNING [{site.name}]: no Sentinel-1 scene was read, so nothing was labelled. Look above for 'unreadable' "
+                "lines or an error from Planetary Computer (token / rate limit), and check the dates and the site box.")
     return metas
 
 
 # ---------------------------------------------------------------------------------------- loading
+def done_days(out_dir, site_name):
+    """{'YYYY-MM-DD'} of the scenes of `site_name` already in the manifest (labelled or rejected): pass it as `skip_days` to
+    resume an interrupted build without re-reading those passes. Empty if there is no manifest yet."""
+    path = os.path.join(out_dir, "manifest.jsonl")
+    if not os.path.exists(path):
+        return set()
+    return {m["date"] for m in read_manifest(out_dir) if m.get("site") == site_name and "date" in m}
+
+
 def read_manifest(out_dir):
     with open(os.path.join(out_dir, "manifest.jsonl")) as fh:
         return [json.loads(line) for line in fh if line.strip()]
@@ -141,12 +154,16 @@ def manifest_table(out_dir, res_m=10.0):
 
 
 def load_patches(out_dir, size=224, stride=112, sites=None, min_labelled=0.5, min_water=0.005, keep_empty=0.2,
-                 max_month_offset=0, seed=0):
+                 max_month_offset=0, seed=0, max_per_scene=None, dtype=np.float32):
     """Training patches from the usable scenes. Returns (X (n,2,s,s) float32, Y (n,s,s) uint8, meta list).
 
     Patches with less than `min_water` water share (of labelled pixels) are mostly land and would swamp the rare water
     class (rivers, small tanks): only a random `keep_empty` fraction of them is kept. `max_month_offset` drops scenes
-    whose JRC month was not the S1 month."""
+    whose JRC month was not the S1 month.
+
+    Memory: a 2000 x 2000 px scene gives hundreds of overlapping 224 px patches (about 0.4 MB each as float32). All patches of
+    all scenes are held in RAM, so for a real run set `max_per_scene` (random subsample, e.g. 32) and `dtype=np.float16`
+    (halves it; the training loop casts each batch back to float32)."""
     rng = np.random.default_rng(seed)
     Xs, Ys, metas = [], [], []
     for m in read_manifest(out_dir):
@@ -155,16 +172,21 @@ def load_patches(out_dir, size=224, stride=112, sites=None, min_labelled=0.5, mi
         z = np.load(os.path.join(out_dir, m["site"], f"{m['date']}.npz"))
         x = pl.normalise_s1(z["vv_db"], z["vh_db"])
         X, Y, C = pl.extract_patches(x, z["labels"], size=size, stride=stride, min_valid=min_labelled)
-        for i, c in enumerate(C):
+        keep = []
+        for i in range(len(C)):
             lab = Y[i][Y[i] != pl.IGNORE]
             wf = float((lab == 1).mean()) if lab.size else 0.0
             if wf < min_water and rng.random() > keep_empty:
                 continue
-            Xs.append(X[i])
+            keep.append((i, wf))
+        if max_per_scene and len(keep) > max_per_scene:
+            keep = [keep[j] for j in sorted(rng.choice(len(keep), max_per_scene, replace=False))]
+        for i, wf in keep:
+            Xs.append(X[i].astype(dtype, copy=False))
             Ys.append(Y[i])
-            metas.append({"site": m["site"], "date": m["date"], "corner": c, "shape": m["shape"], "water_frac": wf})
+            metas.append({"site": m["site"], "date": m["date"], "corner": C[i], "shape": m["shape"], "water_frac": wf})
     if not Xs:
-        return np.zeros((0, 2, size, size), np.float32), np.zeros((0, size, size), np.uint8), []
+        return np.zeros((0, 2, size, size), dtype), np.zeros((0, size, size), np.uint8), []
     return np.stack(Xs), np.stack(Ys), metas
 
 

@@ -26,9 +26,12 @@ pip install -r requirements-fm.txt         # + torch and terratorch for TerraMin
 python -m pytest -q                         # offline, synthetic data (torch tests skip without torch)
 ```
 
-**Notebook (recommended):** `notebooks/angat_water_train_infer.ipynb` runs dataset -> training -> inference -> time series ->
-export. `MODE = "demo"` (default) runs offline on synthetic scenes in a few minutes on a CPU; `MODE = "real"` uses Planetary
-Computer and Earth Engine (`earthengine authenticate` once; a GPU is advisable with the `base` backbone).
+**Notebook (recommended):** `notebooks/angat_water_train_infer.ipynb` runs on **real data**: dataset (Planetary Computer + Earth
+Engine) -> TerraMind training (pretrained, Hugging Face) -> inference -> time series -> export. Set `GEE_PROJECT` in the config
+cell, use a **GPU runtime**, and expect the dataset step to be the long one (about 125 passes per site for 2018-2021, network-bound).
+It is **resumable**: every scene is appended to `manifest.jsonl` on Drive as it finishes, and re-running the dataset cell after a
+disconnect skips the passes already done without reading them again (`RESTART = True` starts over). Patches are held in RAM as
+float16 and capped per scene (`MAX_PATCHES_PER_SCENE`), so the full dataset fits in Colab memory.
 
 **Google Colab:** the notebook's setup cell installs the dependencies itself when it detects Colab. It pins `numpy<2.3`, because Colab's
 preinstalled `numba` requires it; without the pin pip upgrades numpy and prints `numba requires numpy<2.3`. If you see that message,
@@ -74,7 +77,7 @@ python scripts/train_terramind.py --out outputs/angat --backbone terramind_v1_ba
 | `angat_water/pseudo_labels.py` | Otsu-only labels, patch extraction, TerraMind input normalisation |
 | `angat_water/terramind_seg.py` | `TerraMindWater` model, training, sliding-window prediction, `fuse`, checkpoints |
 | `angat_water/infer.py` | `infer_scene`, `iter_window` (any dates), `write_result` (GeoTIFFs), areas |
-| `angat_water/synthetic.py` | synthetic speckled scenes and a synthetic JRC for tests and the demo mode |
+| `angat_water/synthetic.py` | synthetic speckled scenes and a synthetic JRC for the tests |
 | `scripts/` | `run_angat.py`, `build_dataset.py`, `train_terramind.py` |
 | `notebooks/` | `angat_water_train_infer.ipynb` |
 | `tests/` | offline tests (synthetic data; mocked Earth Engine) |
@@ -158,8 +161,8 @@ boundary where it is certain, the model decides the uncertain band, and strong d
 | Refined Lee, edge/binary Otsu, combination, classes | Tested on synthetic speckled scenes: speckle CV 0.50 -> 0.22, IoU >= 0.99 for 2-30 % water, no false lake on a land-only scene |
 | JRC matching, tiered labels, dataset build/load, site hold-out, Earth Engine request blocks | Tested offline with a synthetic JRC (30 m blocks, cloud gaps, wrong-month water level) and a mocked `ee`: labels >= 99.5 % pure, radar-shadow conflicts ignored, wrong-month scenes rejected |
 | TerraMind training, prediction, fusion, checkpoints, inference, export | Run end to end with a tiny **randomly initialised** model on synthetic data |
-| Notebook, `MODE = "demo"` | Executed top to bottom (about 3 min on CPU); outputs are not stored in the repository |
-| **Earth Engine / JRC** (`jrc.GeeJrc`), **Planetary Computer** (`acquire.load_s1`, `iter_scenes`, `run_area`), `MODE = "real"` | **Not run**: the build sandbox blocks both. The Earth Engine request format follows ai-irrigation's `computePixels` calls; check asset ids and authentication on your side |
+| Notebook (real-data flow) | Executed top to bottom with only the four network entry points (Earth Engine init/read, Planetary Computer scene readers) replaced by stand-ins and a tiny untrained model: dataset, resume (a second run reads nothing), labelling, patches, training, checkpoint, inference, time series, export all ran. Outputs are not stored in the repository |
+| **Earth Engine / JRC** (`jrc.GeeJrc`), **Planetary Computer** (`acquire.load_s1`, `iter_scenes`, `run_area`) | **Not run against the live services** from the build sandbox. Planetary Computer search and Earth Engine authentication were confirmed from your Colab run; the JRC band name was corrected after it (`water`), and the JRC reads themselves are the next thing to confirm |
 | Pretrained TerraMind weights, accuracy on real Angat / Magat scenes | **Not run**: Hugging Face was blocked. No real-world accuracy has been measured |
 
 ## Before trusting results
