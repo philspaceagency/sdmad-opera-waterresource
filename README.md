@@ -32,8 +32,8 @@ Computer and Earth Engine (`earthengine authenticate` once; a GPU is advisable w
 
 **Google Colab:** the notebook's setup cell installs the dependencies itself when it detects Colab. It pins `numpy<2.3`, because Colab's
 preinstalled `numba` requires it; without the pin pip upgrades numpy and prints `numba requires numpy<2.3`. If you see that message,
-or numpy was imported before the install, use Runtime > Restart session and run again. If the notebook is not started from inside the
-repository (e.g. the repo is on Google Drive), set `os.environ["REPO_ROOT"]` to its folder first. The same pin is safe elsewhere: the tests
+or numpy was imported before the install, use Runtime > Restart session and run again. The repository root is hard-coded in that cell
+(`ROOT = Path("/content/drive/MyDrive/Surface_Water/project")`, Drive is mounted if needed): edit that one line if your copy lives elsewhere. The same pin is safe elsewhere: the tests
 pass on numpy 2.2.6 as well as on 2.5.
 
 **Scripts:**
