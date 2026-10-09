@@ -1,0 +1,15 @@
+# core (Otsu + speckle + pseudo labels): runs offline
+numpy
+scipy
+scikit-image
+shapely
+pytest
+# acquisition (Planetary Computer sentinel-1-rtc, same stack as Leads-DigiSaka-System/ai-irrigation)
+pandas
+pystac-client
+planetary-computer
+odc-stac
+rasterio
+pyproj
+affine
+# optional: TerraMind stage (see requirements-fm.txt)
