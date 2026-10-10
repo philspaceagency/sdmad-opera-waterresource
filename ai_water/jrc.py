@@ -56,6 +56,16 @@ def grid_from_geobox(gb):
     return Grid(str(gb.crs), float(t.a), float(t.c), float(t.f), int(gb.shape[1]), int(gb.shape[0]))
 
 
+def grid_for_bbox(bbox, crs, res_m):
+    """Grid of `res_m` pixels covering a lon/lat (west, south, east, north) box in a metric CRS (pyproj only, no odc)."""
+    from pyproj import Transformer
+    tr = Transformer.from_crs("EPSG:4326", crs, always_xy=True)
+    xs, ys = tr.transform([bbox[0], bbox[2], bbox[0], bbox[2]], [bbox[1], bbox[1], bbox[3], bbox[3]])
+    x0, x1 = np.floor(min(xs) / res_m) * res_m, np.ceil(max(xs) / res_m) * res_m
+    y0, y1 = np.floor(min(ys) / res_m) * res_m, np.ceil(max(ys) / res_m) * res_m
+    return Grid(crs, float(res_m), float(x0), float(y1), int((x1 - x0) / res_m), int((y1 - y0) / res_m))
+
+
 def init_gee(project=None, high_volume=True, authenticate=False):
     """ee.Initialize (same as ai-irrigation's weather.init_gee). Authenticate once with `earthengine authenticate`."""
     import ee

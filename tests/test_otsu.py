@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 
-from angat_water import otsu, pipeline, preprocess as pp, speckle, synthetic as syn
+from ai_water import otsu, pipeline, preprocess as pp, speckle, synthetic as syn
 
 
 def _db(scene, filt=True):

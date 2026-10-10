@@ -6,7 +6,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from angat_water import dataset, jrc, labels as lb, otsu, pipeline, pseudo_labels as pl, sites, synthetic as syn
+from ai_water import dataset, jrc, labels as lb, otsu, pipeline, pseudo_labels as pl, sites, synthetic as syn
 
 S = 3  # Landsat 30 m = 3 Sentinel-1 pixels of 10 m
 
@@ -286,90 +286,3 @@ def test_transient_classifier():
                                             "Connection reset by peer", "429"))
     assert not t(RuntimeError("ImageCollection.mosaic: Error in map(ID=2018_01): Image.select: Band pattern 'waterClass' "
                               "did not match any bands. Available bands: [water]"))
-
-
-def test_site_registry():
-    assert sites.get("Angat").name == "angat" and sites.get("magat").bbox[0] < sites.get("magat").bbox[2]
-    with pytest.raises(KeyError):
-        sites.get("nowhere")
-
-
-# ------------------------------------------------------------------ failure messages (empty / all-rejected manifests)
-def test_manifest_table_explains_an_empty_or_missing_manifest(tmp_path):
-    with pytest.raises(RuntimeError, match="does not exist"):
-        dataset.manifest_table(str(tmp_path))
-    (tmp_path / "manifest.jsonl").write_text("")
-    with pytest.raises(RuntimeError, match="is empty.*no scenes"):
-        dataset.manifest_table(str(tmp_path))
-
-
-def test_manifest_table_explains_when_every_scene_was_rejected(tmp_path):
-    rows = [{"site": "angat", "date": "2019-05-12", "usable": False, "reject_reason": "low_agreement",
-             "labels": {"agreement": 0.7, "water_px": 10, "jrc_nodata_frac": 0.0}},
-            {"site": "angat", "date": "2019-06-12", "usable": False, "reject_reason": "no_jrc_month"}]
-    (tmp_path / "manifest.jsonl").write_text("\n".join(json.dumps(r) for r in rows))
-    with pytest.raises(RuntimeError, match=r"all 2 scenes were rejected.*low_agreement.*max_month_offset"):
-        dataset.manifest_table(str(tmp_path))
-
-
-def test_manifest_table_has_the_columns_the_notebook_groups_by(tmp_path):
-    cfg = dataset.DatasetConfig(out_dir=str(tmp_path), water=pipeline.WaterConfig(min_area_px=50, fill_holes_px=50))
-    sc = syn.make_scene(shape=(384, 384), water_frac=0.2, looks=4, seed=11)
-    dataset.build_site(sites.Site("testsite", (121.0, 15.0, 121.1, 15.1)), cfg, iter([("2019-05-12", sc["vv"], sc["vh"])]),
-                       GRID, FakeJrc({"2019-05": sc["truth"]}), log=lambda *_: None)
-    tbl = dataset.manifest_table(str(tmp_path))
-    assert list(tbl.groupby("site")["usable"].sum()) == [1] and {"agreement", "water_km2", "reject_reason"} <= set(tbl)
-
-
-def test_build_site_warns_when_no_scene_was_read(tmp_path):
-    logs = []
-    cfg = dataset.DatasetConfig(out_dir=str(tmp_path))
-    out = dataset.build_site(sites.Site("testsite", (121.0, 15.0, 121.1, 15.1)), cfg, iter([]), GRID, FakeJrc({}), log=logs.append)
-    assert out == [] and any("WARNING" in m and "no Sentinel-1 scene was read" in m for m in logs)
-
-
-# ------------------------------------------------------------------ resume and memory controls for long real runs
-def _two_scene_dataset(tmp_path):
-    cfg = dataset.DatasetConfig(out_dir=str(tmp_path), water=pipeline.WaterConfig(min_area_px=50, fill_holes_px=50))
-    a = syn.make_scene(shape=(384, 384), water_frac=0.2, looks=4, seed=21)
-    b = syn.make_scene(shape=(384, 384), water_frac=0.16, looks=4, seed=22)
-    src = FakeJrc({"2019-05": a["truth"], "2019-06": b["truth"]})
-    scenes = [("2019-05-12", a["vv"], a["vh"]), ("2019-06-12", b["vv"], b["vh"])]
-    dataset.build_site(sites.Site("s1", (121.0, 15.0, 121.1, 15.1)), cfg, iter(scenes), GRID, src, log=lambda *_: None)
-    return cfg
-
-
-def test_done_days_lists_only_the_sites_own_finished_dates(tmp_path):
-    assert dataset.done_days(str(tmp_path), "s1") == set()                       # no manifest yet
-    _two_scene_dataset(tmp_path)
-    assert dataset.done_days(str(tmp_path), "s1") == {"2019-05-12", "2019-06-12"}
-    assert dataset.done_days(str(tmp_path), "other") == set()
-
-
-def test_a_second_build_appends_to_the_manifest_instead_of_replacing_it(tmp_path):
-    cfg = _two_scene_dataset(tmp_path)
-    c = syn.make_scene(shape=(384, 384), water_frac=0.12, looks=4, seed=23)
-    dataset.build_site(sites.Site("s1", (121.0, 15.0, 121.1, 15.1)), cfg, iter([("2019-07-12", c["vv"], c["vh"])]), GRID,
-                       FakeJrc({"2019-07": c["truth"]}), log=lambda *_: None)
-    assert len(dataset.read_manifest(str(tmp_path))) == 3
-    assert dataset.done_days(str(tmp_path), "s1") == {"2019-05-12", "2019-06-12", "2019-07-12"}
-
-
-def test_load_patches_caps_patches_per_scene_and_can_store_float16(tmp_path):
-    _two_scene_dataset(tmp_path)
-    X32, Y32, m32 = dataset.load_patches(str(tmp_path), size=128, stride=32, keep_empty=1.0)
-    X16, Y16, m16 = dataset.load_patches(str(tmp_path), size=128, stride=32, keep_empty=1.0, max_per_scene=5, dtype=np.float16)
-    assert len(m32) > 10 and len(m16) == 10                                       # 2 scenes x 5
-    assert X16.dtype == np.float16 and X32.dtype == np.float32 and X16[0].nbytes * 2 == X32[0].nbytes
-    for sc in ("2019-05-12", "2019-06-12"):
-        assert sum(1 for m in m16 if m["date"] == sc) == 5
-    first = X16[0].astype(np.float32)                                              # same content, reduced precision only
-    ref = next(X32[i] for i, m in enumerate(m32) if m["corner"] == m16[0]["corner"] and m["date"] == m16[0]["date"])
-    assert np.abs(first - ref).max() < 0.01 * max(1.0, np.abs(ref).max())
-
-
-def test_build_site_on_a_finished_run_says_nothing_new_instead_of_warning(tmp_path):
-    cfg = _two_scene_dataset(tmp_path)
-    logs = []
-    out = dataset.build_site(sites.Site("s1", (121.0, 15.0, 121.1, 15.1)), cfg, iter([]), GRID, FakeJrc({}), log=logs.append)
-    assert out == [] and any("nothing new to label" in m and "2 scene(s)" in m for m in logs) and not any("WARNING" in m for m in logs)

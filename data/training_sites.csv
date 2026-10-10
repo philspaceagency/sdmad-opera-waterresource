@@ -1,0 +1,11 @@
+# Training sites for TerraMind: one row per water body (3 dams, 1 lake, 2 river reaches).
+# corners = two opposite corners of the area of interest as (lat, lon), copied from a map. Other accepted forms (see ai_water/sites.py):
+#   south,west,north,east columns, or lat,lon[,radius_km] columns.
+# kind = reservoir | lake | river. Boxes smaller than 5 km on a side are expanded about their centre (Sampaloc Lake is 1.4 km).
+name,kind,corners
+Angat Dam,reservoir,"((14.872088697247067, 121.14302981543655),(15.053187085370627, 121.26233447214564))"
+Magat Dam,reservoir,"((16.714838338457948, 121.30825389251115),(16.85568413745271, 121.52111399871818))"
+La Mesa Dam,reservoir,"((14.710597170085792, 121.06664050452557),(14.780486463948323, 121.1450039226339))"
+Sampaloc Lake,lake,"((14.072480489177936, 121.32318842188701),(14.085093245482044, 121.33666383988249))"
+Libmanan River,river,"((13.666256103543727, 123.09048521400325),(13.719793253302335, 123.14224111878835))"
+Cagayan River,river,"((18.167058608645497, 121.60578596351719),(18.30368640395873, 121.71049940271759))"

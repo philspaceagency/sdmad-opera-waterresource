@@ -9,7 +9,7 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from angat_water import pipeline, synthetic  # noqa: E402
+from ai_water import pipeline, synthetic  # noqa: E402
 
 
 def main():

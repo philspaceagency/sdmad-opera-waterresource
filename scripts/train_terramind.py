@@ -3,7 +3,7 @@
 Two label sources:
 
   JRC-matched dataset (recommended; several sites; see scripts/build_dataset.py)
-      python scripts/train_terramind.py --dataset outputs/dataset --holdout-sites magat
+      python scripts/train_terramind.py --dataset outputs/dataset --holdout-sites "La Mesa Dam"
 
   Otsu-only pseudo-labels of one site (output of scripts/run_angat.py)
       python scripts/train_terramind.py --out outputs/angat --backbone terramind_v1_base
@@ -20,7 +20,7 @@ import numpy as np
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from angat_water import pseudo_labels as pl, terramind_seg as tm  # noqa: E402
+from ai_water import pseudo_labels as pl, terramind_seg as tm  # noqa: E402
 
 
 def _read(path):
@@ -30,7 +30,7 @@ def _read(path):
 
 
 def train_on_dataset(a):
-    from angat_water import dataset
+    from ai_water import dataset
     X, Y, metas = dataset.load_patches(a.dataset, size=a.patch, stride=a.patch // 2, keep_empty=a.keep_empty)
     if not len(X):
         raise SystemExit("no usable patches: check manifest.jsonl for the rejection reasons")

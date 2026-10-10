@@ -1,7 +1,7 @@
 import numpy as np
 from scipy import ndimage as ndi
 
-from angat_water import speckle, synthetic as syn
+from ai_water import speckle, synthetic as syn
 
 
 def _cv(a, mask):

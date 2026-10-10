@@ -2,7 +2,7 @@
 import numpy as np
 import pytest
 
-from angat_water import jrc, synthetic as syn
+from ai_water import jrc, synthetic as syn
 
 
 def test_synthetic_jrc_is_a_30m_view_of_the_truth_with_gaps():
@@ -26,7 +26,7 @@ def test_synthetic_jrc_source_matches_the_gee_interface():
 def test_write_result_makes_geotiffs(tmp_path):
     rasterio = pytest.importorskip("rasterio")
     from affine import Affine
-    from angat_water import infer, otsu
+    from ai_water import infer, otsu
     h = w = 32
     res = infer.SceneResult(np.zeros((h, w), np.float32), np.zeros((h, w), np.float32),
                             np.full((h, w), otsu.CLASS_LAND, np.uint8), np.zeros((h, w), bool),
