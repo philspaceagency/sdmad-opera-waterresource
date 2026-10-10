@@ -10,6 +10,8 @@ pystac-client
 planetary-computer
 odc-stac
 rasterio
+# optional: GeoPackage / Shapefile / KML outlines for the water bodies to map (GeoJSON needs nothing extra)
+# geopandas
 pyproj
 affine
 # JRC labels (Google Earth Engine; run `earthengine authenticate` once)

@@ -24,9 +24,9 @@ import pandas as pd
 MPC_STAC_URL = "https://planetarycomputer.microsoft.com/api/stac/v1"
 S1_COLLECTION = "sentinel-1-rtc"
 
-# Angat Dam (14.91 N, 121.15 E) and its reservoir, Norzagaray / Dona Remedios Trinidad, Bulacan.
-# Generous box (~19 x 22 km) around the dam wall, reservoir and the upper Angat river; replace with your AOI polygon.
-ANGAT_BBOX = (121.08, 14.85, 121.26, 15.05)      # (west, south, east, north) EPSG:4326
+# Angat Dam (14.91 N, 121.15 E) and its reservoir, Norzagaray / Dona Remedios Trinidad, Bulacan: the default area.
+# Corners supplied by the project (lat, lon): (14.8721, 121.1430) and (15.0532, 121.2623).
+ANGAT_BBOX = (121.14302981543655, 14.872088697247067, 121.26233447214564, 15.053187085370627)   # (west, south, east, north)
 ANGAT_CRS = "EPSG:32651"                         # UTM 51N
 
 _CATALOG = None

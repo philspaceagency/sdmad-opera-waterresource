@@ -5,7 +5,7 @@ import pytest
 torch = pytest.importorskip("torch")
 pytest.importorskip("terratorch")
 
-from angat_water import otsu, pipeline, pseudo_labels as pl, synthetic as syn, terramind_seg as tm  # noqa: E402
+from ai_water import otsu, pipeline, pseudo_labels as pl, synthetic as syn, terramind_seg as tm  # noqa: E402
 
 
 @pytest.fixture(scope="module")
@@ -71,7 +71,7 @@ def test_checkpoint_roundtrip_rebuilds_without_pretrained_download(model, tmp_pa
 
 
 def test_infer_scene_with_and_without_model(model):
-    from angat_water import infer
+    from ai_water import infer
     s = syn.make_scene(shape=(256, 256), water_frac=0.15, seed=4)
     cfg = pipeline.WaterConfig(min_area_px=50, fill_holes_px=50)
     base = infer.infer_scene(s["vv"], s["vh"], None, cfg)

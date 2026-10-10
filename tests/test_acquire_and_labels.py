@@ -8,7 +8,7 @@ import pytest
 pytest.importorskip("shapely")
 from shapely.geometry import box, mapping  # noqa: E402
 
-from angat_water import acquire, otsu, pseudo_labels as pl  # noqa: E402
+from ai_water import acquire, otsu, pseudo_labels as pl  # noqa: E402
 
 BBOX = acquire.ANGAT_BBOX
 
@@ -94,7 +94,7 @@ def test_iter_scenes_without_a_covering_pass_raises(monkeypatch):
 
 
 def test_dataset_iter_s1_clamps_the_window_to_jrc_coverage(monkeypatch):
-    from angat_water import dataset, sites
+    from ai_water import dataset, sites
     calls = _patch_io(monkeypatch, [_item(61, "ascending", (2021, 12, 20, 10))])
     cfg = dataset.DatasetConfig(start="2016-01-01", end="2023-12-31")
     grid, gen = dataset.iter_s1(sites.get("angat"), cfg, log=lambda *_: None)

@@ -195,7 +195,7 @@ def split_patches(metas, size=224, holdout_sites=(), val_frac=0.25):
     test: Magat never seen in training). Otherwise an east-strip block of every scene, so overlapping neighbours
     never straddle the split."""
     if holdout_sites:
-        hs = {s.lower() for s in holdout_sites}
+        hs = {sites_mod.slug(s) for s in holdout_sites}                  # 'Magat Dam', 'magat dam' and 'magat_dam' all match
         val = [i for i, m in enumerate(metas) if m["site"] in hs]
         train = [i for i, m in enumerate(metas) if m["site"] not in hs]
         return train, val
