@@ -86,18 +86,45 @@ class TerraMindWater(nn.Module):
 
 
 # ---------------------------------------------------------------------------------------- checkpoints
-def save_checkpoint(model, path, meta=None):
-    """Weights + what is needed to rebuild the model (backbone name, decoder width) + free-form `meta`."""
+def _trained_state(model):
+    """The weights that training changed: everything outside the encoder (decoder, pixel stem, head, BatchNorm statistics)
+    plus any encoder parameters that were unfrozen. With the default frozen encoder this is ~4 MB for `base`, against
+    ~350 MB for the whole model."""
+    trainable = {n for n, p in model.named_parameters() if p.requires_grad}
+    return {k: v for k, v in model.state_dict().items() if not k.startswith("enc.") or k in trainable}
+
+
+def save_checkpoint(model, path, meta=None, trainable_only=False):
+    """Save a model plus what is needed to rebuild it (backbone name, decoder width) and free-form `meta`.
+
+    trainable_only=False : the complete model, pretrained encoder included. Self-contained and loads offline, but large
+                           (~350 MB for `terramind_v1_base`): keep it on Drive / a release, not in git (GitHub rejects > 100 MB).
+    trainable_only=True  : only the weights training changed (see `_trained_state`), a few MB: fine for git. Loading it
+                           rebuilds the pretrained encoder from Hugging Face (`load_checkpoint`).
+    `meta` is stored as plain JSON-compatible data so the file loads with `torch.load(weights_only=True)`."""
+    import json
+    state = _trained_state(model) if trainable_only else model.state_dict()
     torch.save({"backbone": model.backbone_name, "width": model.width, "n_classes": model.n_classes,
-                "state_dict": model.state_dict(), "meta": meta or {}}, path)
+                "trainable_only": bool(trainable_only), "state_dict": state,
+                "meta": json.loads(json.dumps(meta or {}, default=str))}, path)
 
 
-def load_checkpoint(path, device="cpu"):
-    """Rebuild a TerraMindWater from `save_checkpoint` WITHOUT downloading the pretrained backbone weights (they are
-    inside the checkpoint). Returns (model in eval mode, meta)."""
-    ck = torch.load(path, map_location=device, weights_only=False)
-    model = TerraMindWater(ck["backbone"], pretrained=False, width=ck["width"], n_classes=ck["n_classes"])
-    model.load_state_dict(ck["state_dict"])
+def load_checkpoint(path, device="cpu", pretrained_backbone=True):
+    """Rebuild a TerraMindWater from `save_checkpoint`. Returns (model in eval mode, meta).
+
+    A full checkpoint loads without any download (the encoder weights are inside). A trainable-only checkpoint first builds the
+    pretrained encoder from Hugging Face (`pretrained_backbone=True`, needs network) and then loads the saved weights on top;
+    it refuses a file whose weights do not fit the model rather than silently leaving them random."""
+    ck = torch.load(path, map_location=device, weights_only=True)
+    light = ck.get("trainable_only", False)
+    model = TerraMindWater(ck["backbone"], pretrained=bool(light and pretrained_backbone), width=ck["width"],
+                           n_classes=ck["n_classes"])
+    res = model.load_state_dict(ck["state_dict"], strict=not light)
+    if light:
+        missing = [k for k in res.missing_keys if not k.startswith("enc.")]
+        if missing or res.unexpected_keys:
+            raise RuntimeError(f"{path}: checkpoint does not match {ck['backbone']} (width {ck['width']}): "
+                               f"missing {missing[:3]}, unexpected {list(res.unexpected_keys)[:3]}")
     return model.to(device).eval(), ck.get("meta", {})
 
 
