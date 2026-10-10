@@ -154,6 +154,22 @@ boundary where it is certain, the model decides the uncertain band, and strong d
 `model-only` (candidate flooded vegetation / shallow water) and `Otsu-only`. `iter_window` reads any dates; `write_result` writes
 `*_otsu_classes`, `*_fused_water`, `*_flags`, `*_prob` GeoTIFFs; `SceneResult.area_km2` gives areas for a time series.
 
+## Saving and sharing the model
+
+Training (notebook section 4, or `scripts/train_terramind.py`) writes two checkpoints plus the training history:
+
+| File | Holds | Size (`terramind_v1_base`) | Where it lives |
+|---|---|---|---|
+| `outputs/model/terramind_water.pt` | the **complete** model, pretrained encoder included; loads offline | about 346 MB | Drive (too big for git: GitHub rejects files over 100 MB; `outputs/` and `*.pt` are git-ignored) |
+| `outputs/model/terramind_water_decoder.pt` | only the weights training changed (decoder, pixel stem, head, BatchNorm statistics, plus any unfrozen encoder blocks) | about 4 MB | copied to `models/` in the repo, which `.gitignore` allows |
+| `outputs/model/training_history.json` | per-epoch loss and validation IoU, plus the configuration | small | Drive |
+
+`tm.load_checkpoint(path)` loads either. The small file rebuilds the pretrained encoder from Hugging Face and loads the trained weights on top, so it needs network
+access and the **same pretrained encoder** the model was trained with (it refuses a file that does not fit the model). The notebook reloads both files right after
+training and checks that they reproduce the trained model's output, then copies the small checkpoint and a model card (`models/terramind_water_decoder.json`: training
+setup, validation IoU per held-out site, how to load it) into `models/`. To publish: `git add models/ && git commit && git push`. For the full 346 MB file use Git LFS, a
+GitHub Release or the Hugging Face Hub instead. The validation IoU in the card is against the JRC x Otsu training labels, not against ground truth.
+
 ## Verification status
 
 | Part | Status |
@@ -161,6 +177,7 @@ boundary where it is certain, the model decides the uncertain band, and strong d
 | Refined Lee, edge/binary Otsu, combination, classes | Tested on synthetic speckled scenes: speckle CV 0.50 -> 0.22, IoU >= 0.99 for 2-30 % water, no false lake on a land-only scene |
 | JRC matching, tiered labels, dataset build/load, site hold-out, Earth Engine request blocks | Tested offline with a synthetic JRC (30 m blocks, cloud gaps, wrong-month water level) and a mocked `ee`: labels >= 99.5 % pure, radar-shadow conflicts ignored, wrong-month scenes rejected |
 | TerraMind training, prediction, fusion, checkpoints, inference, export | Run end to end with a tiny **randomly initialised** model on synthetic data |
+| Checkpoints (full and small), reload, exact reproduction, `.gitignore` rules | Tested: the small checkpoint holds only trained weights (0.74M of 6.2M params for `tiny`; 4.1 MB vs 346 MB for `base`), reloads to identical outputs, refuses a mismatched file, and loads with `torch.load(weights_only=True)`; `git check-ignore` confirms `models/*.pt` is trackable and `outputs/**/*.pt` is not |
 | Notebook (real-data flow) | Executed top to bottom with only the four network entry points (Earth Engine init/read, Planetary Computer scene readers) replaced by stand-ins and a tiny untrained model: dataset, resume (a second run reads nothing), labelling, patches, training, checkpoint, inference, time series, export all ran. Outputs are not stored in the repository |
 | **Earth Engine / JRC** (`jrc.GeeJrc`), **Planetary Computer** (`acquire.load_s1`, `iter_scenes`, `run_area`) | **Not run against the live services** from the build sandbox. Planetary Computer search and Earth Engine authentication were confirmed from your Colab run; the JRC band name was corrected after it (`water`), and the JRC reads themselves are the next thing to confirm |
 | Pretrained TerraMind weights, accuracy on real Angat / Magat scenes | **Not run**: Hugging Face was blocked. No real-world accuracy has been measured |

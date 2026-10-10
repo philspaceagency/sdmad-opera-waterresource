@@ -43,7 +43,12 @@ def train_on_dataset(a):
     model = tm.TerraMindWater(a.backbone, pretrained=not a.no_pretrained, unfreeze_last=a.unfreeze_last)
     tm.train(model, X, Y, tr, va, epochs=a.epochs, batch=a.batch, lr=a.lr)
     os.makedirs(a.out, exist_ok=True)
-    tm.save_checkpoint(model, os.path.join(a.out, "terramind_water.pt"), {"dataset": a.dataset, "sites": sites})
+    meta = {"dataset": a.dataset, "sites": sites, "backbone": a.backbone, "pretrained_encoder": not a.no_pretrained,
+            "holdout": a.holdout_sites, "epochs": a.epochs}
+    tm.save_checkpoint(model, os.path.join(a.out, "terramind_water.pt"), meta)                         # complete (large)
+    tm.save_checkpoint(model, os.path.join(a.out, "terramind_water_decoder.pt"), meta, trainable_only=True)  # small: fine for git
+    for f in ("terramind_water.pt", "terramind_water_decoder.pt"):
+        print(f"saved {os.path.join(a.out, f)}  ({os.path.getsize(os.path.join(a.out, f)) / 1e6:.1f} MB)")
     if va:
         per = {}
         for s in sorted({metas[i]["site"] for i in va}):
@@ -95,6 +100,7 @@ def main():
     model = tm.TerraMindWater(a.backbone, pretrained=not a.no_pretrained, unfreeze_last=a.unfreeze_last)
     tm.train(model, X, Y, tr, va, epochs=a.epochs, batch=a.batch, lr=a.lr)
     tm.save_checkpoint(model, os.path.join(a.out, "terramind_water.pt"), {"labels": "otsu"})
+    tm.save_checkpoint(model, os.path.join(a.out, "terramind_water_decoder.pt"), {"labels": "otsu"}, trainable_only=True)
 
     import rasterio
     for r in meta["scenes"]:

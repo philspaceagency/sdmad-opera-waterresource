@@ -5,4 +5,6 @@ outputs/
 cache/
 *.tif
 *.pt
+# small trained-weights checkpoints are allowed in models/ (see README: Saving and sharing the model)
+!models/*.pt
 .venv/
