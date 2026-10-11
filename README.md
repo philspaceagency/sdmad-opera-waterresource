@@ -2,27 +2,56 @@
 
 Surface-water mapping from Sentinel-1 for the Philippines: **one water body (Angat Dam by default), many bodies, or the whole country.**
 
-1. **Otsu water maps** - refined-Lee speckle filtering and a robust **edge-Otsu + binary-Otsu** threshold.
-2. **A labelled training dataset** - each Sentinel-1 date labelled with the **JRC Monthly History** map of the *same month* (Google Earth Engine), kept
-   only where JRC and Otsu agree. Six water bodies are used for training: Angat, Magat and La Mesa dams, Sampaloc Lake, Libmanan and Cagayan river reaches.
-3. **TerraMind** (`S1RTC`) fine-tuned on that dataset, then **fused** with Otsu for mapping on any date.
+1. **Inputs** - Sentinel-1 RTC (VV, VH) from **ascending and descending** passes, the **SDWI** water index derived from them, the **DEM** with its **slope and aspect**,
+   and **land cover** (ESA WorldCover) as context only.
+2. **Labels** - each Sentinel-1 date labelled with the **JRC Monthly History** map of the *same month* (Google Earth Engine), corrected with the terrain. **No Otsu thresholding
+   anywhere**: the model decides what is water. Six water bodies are used for training: Angat, Magat and La Mesa dams, Sampaloc Lake, Libmanan and Cagayan river reaches.
+3. **TerraMind** (`S1RTC`) fine-tuned on that dataset, then used to map any date.
 
 ```
 Planetary Computer sentinel-1-rtc (VV, VH, linear gamma0, 10 m)        acquire.py
-   -> one relative orbit, the whole area in one frame, local solar day
-   -> refined Lee (linear power) -> dB                                 speckle.py, preprocess.py
-   -> edge-Otsu + binary-Otsu -> water / land / uncertain / nodata     otsu.py, pipeline.py
+   -> best ascending AND best descending relative orbit, local solar day
+   -> refined Lee (linear power) -> VV dB, VH dB, SDWI                 speckle.py, preprocess.py, scene.py
+ + Earth Engine: DEM -> relief, slope, aspect; WorldCover -> groups    terrain.py, features.py
 
  TRAINING  (notebooks/ai_water_training.ipynb)
    + JRC monthly map of the SAME calendar month (Earth Engine)         jrc.py
-   -> tiered labels + per-pixel source + JRC-Otsu agreement            labels.py, dataset.py
-   -> TerraMind S1RTC encoder + light decoder -> models/               terramind_seg.py
+   -> labels: JRC, hard negatives, steep-water ignored, shoreline band labels.py, dataset.py
+   -> TerraMind S1RTC encoder + decoder over 14 channels -> models/    terramind_seg.py
 
  MAPPING   (notebooks/ai_water_inference.ipynb, scripts/map_water.py)
    area: Angat Dam (default) | a dam's vector file | many bodies | ~20 km tiles over a country   sites.py, nationwide.py
-   -> Otsu + P(water) -> fused map + disagreement flags, per body and date   infer.py
-   -> areas.csv, water-frequency map, per-date masks, failures.csv           batch.py
+   -> P(water) per pass -> water mask (+ terrain safeguard flag), per body, date and orbit        infer.py
+   -> areas.csv, water-frequency map = min(ascending, descending), per-date masks, failures.csv   batch.py
 ```
+
+## Why terrain, SDWI and both pass directions
+
+A reservoir in steep country showed white streaks of "water" all over its slopes. Those are **radar shadow**: a slope facing away from the sensor returns almost nothing, exactly
+like calm water. With one fixed orbit the shadow sits on the same pixels on every date, so a frequency map shows it as permanent water. Three things fix it:
+
+- **Both pass directions.** Shadow falls on opposite slopes in the ascending and descending geometries. The frequency map is the pixel-wise **minimum** of the two directions'
+  frequencies (`frequency_ascending.tif` and `frequency_descending.tif` are written too, so you can see it).
+- **Terrain channels.** The model sees relief (height above the local low, not absolute altitude), slope, aspect and the **range slope**: the slope along the radar look direction,
+  positive where the ground faces away from the sensor. It can then tell a dark flat lake from a dark steep hillside.
+- **Labels that contain the trap.** JRC (Landsat) says *land* on those slopes, so they are labelled land, and the ones that are dark in the radar are counted as **hard negatives** and
+  kept in the training patches. (Before, labels needed Otsu and JRC to agree, so the contradictions were thrown away and the model never saw shadow as land.)
+
+## The model's 14 input channels (`features.py`)
+
+| Channels | What | Notes |
+|---|---|---|
+| 0-1 | VV dB, VH dB | the two channels the pretrained TerraMind `S1RTC` encoder reads (standardised with its own statistics) |
+| 2 | **SDWI** = ln(10 x VV x VH) - 8 | Sentinel-1 Dual-Polarized Water Index (Jia et al. 2019) on the speckle-filtered linear power |
+| 3-4 | relief, slope | from the Copernicus GLO-30 DEM (`COPERNICUS/DEM/GLO30`) |
+| 5-6 | aspect (sin, cos) | fades to 0 on flat ground, where aspect means nothing |
+| 7 | range slope | depends on the pass direction (nominal look azimuth 80 deg ascending, 280 deg descending) |
+| 8-13 | land cover | one-hot: tree, shrub/grass, crop, built, bare, wetland (ESA WorldCover v200). **Water is not a class**, so the layer cannot hand over the answer |
+
+Only channels 0-1 go through the pretrained encoder; the rest reach the decoder through the pixel stem (late fusion). TerraMind also has a native `DEM` modality; it is not used,
+because it expects absolute elevation, and a multi-modal token merge cannot be checked without the pretrained weights. **Land cover is context only**: in half of the training samples
+its channels are zeroed, so the model cannot lean on it, and it is the one layer you can switch off at mapping time (`USE_LANDCOVER = False`). There is no flip/rotation augmentation,
+because aspect and the range slope would stop matching the image.
 
 ## Quick start
 
@@ -39,8 +68,8 @@ Two notebooks, run in this order (both work on **real data**; use a GPU runtime)
 | `notebooks/ai_water_training.ipynb` | builds the JRC-labelled dataset for the six training sites (`data/training_sites.csv`), trains TerraMind with a site held out, saves the model (`models/terramind_water_decoder.pt` + model card) |
 | `notebooks/ai_water_inference.ipynb` | maps surface water with that model. `RUN_MODE = "single"` (default **Angat Dam**, or the vector file of another dam), `"multiple"` (several bodies in one run), `"nationwide"` (the whole country in tiles) |
 
-Set `GEE_PROJECT` in the config cell (needed for the dataset and for nationwide pre-screening). Both are **resumable**: a training dataset build or a mapping run that is
-interrupted (a Colab disconnect) continues where it stopped, without reading the finished Sentinel-1 passes again.
+Set `GEE_PROJECT` in the config cell: Earth Engine is always needed (JRC labels in training, DEM and land cover everywhere). Both notebooks are **resumable**: a dataset build or a mapping
+run that is interrupted (a Colab disconnect) continues where it stopped, without reading the finished Sentinel-1 passes again.
 
 **Google Colab:** the setup cell installs the dependencies itself when it detects Colab. It pins `numpy<2.3`, because Colab's preinstalled `numba` requires it; without the pin pip
 upgrades numpy and prints `numba requires numpy<2.3`. If you see that message, or numpy was imported before the install, use Runtime > Restart session and run again. The
@@ -72,12 +101,13 @@ Under `outputs/maps` (the `OUT` setting):
 
 | File | Content |
 |---|---|
-| `areas.csv` | one row per site and date: Otsu and fused water area (km2), the model-only / Otsu-only candidate areas, the observed area, the Otsu mode |
-| `<site>/frequency.tif` | % of the valid observations on which each pixel was water (255 = never observed): permanent water 100, seasonal or flooded areas in between |
-| `<site>/n_obs.tif` | number of valid observations per pixel |
-| `<site>/<date>_fused_water.tif`, `_flags.tif` ... | per-date masks (`WRITE`; none by default for nationwide) |
+| `areas.csv` | one row per site, date and pass direction: water area (km2), the area the terrain safeguard removed, the observed area |
+| `<site>/frequency.tif` | % of the valid observations on which each pixel was water (255 = never observed). With both directions: the **minimum** of the two directions' frequencies |
+| `<site>/frequency_ascending.tif`, `frequency_descending.tif` | the per-direction frequencies, when both directions were observed |
+| `<site>/n_obs.tif` | number of valid observations per pixel (both directions) |
+| `<site>/<date>_<orbit>_water.tif`, `_flags.tif`, `_prob.tif` | per-date masks (`WRITE`; none by default for nationwide). `flags`: 0 land, 1 water, 2 the model said water but the slope is steeper than `MAX_SLOPE_DEG` (25 deg): removed, listed for review |
 | `failures.csv` | sites that failed (no pass covers them, a read error) with the reason |
-| `index.geojson` | nationwide only: every tile with status, dates, mean / max area |
+| `index.geojson` | nationwide only: every tile with status, scenes, mean / max area |
 
 ## Scripts
 
@@ -88,35 +118,33 @@ export PC_SDK_SUBSCRIPTION_KEY=...          # optional: higher Planetary Compute
 python scripts/build_dataset.py --gee-project <project> --start 2018-01-01 --end 2021-12-31      # the six sites; resumes
 python scripts/train_terramind.py --dataset outputs/dataset --holdout-sites "La Mesa Dam" --out outputs/model
 
-# mapping
-python scripts/map_water.py --start 2024-01-01 --end 2024-03-31                                   # Angat Dam
+# mapping (needs a trained model and Earth Engine for the terrain)
+python scripts/map_water.py --gee-project <project> --start 2024-01-01 --end 2024-03-31          # Angat Dam
 python scripts/map_water.py --aoi my_dam.geojson --start ... --end ...                            # another dam
 python scripts/map_water.py --aoi dams.geojson --multiple --start ... --end ...                   # many bodies
 python scripts/map_water.py --nationwide --boundary philippines.geojson --prescreen --gee-project <project> \
         --bbox 120.5 14.0 121.5 15.0 --start ... --end ...                                        # a region first, then the country
-python scripts/map_water.py --otsu-only ...                                                       # thresholds only, no model needed
-
-python scripts/run_angat.py --start 2024-01-01 --end 2024-12-31 --out outputs/angat               # Otsu only, one site -> thresholds.json
 ```
 
 ## Repository layout
 
 | Path | Purpose |
 |---|---|
-| `ai_water/acquire.py` | Planetary Computer `sentinel-1-rtc`: STAC search + cache, signing, orbit choice, 10 m reads, `iter_scenes` |
-| `ai_water/speckle.py`, `preprocess.py` | `refined_lee`, `lee`, `multitemporal_mean` (linear power); linear <-> dB |
-| `ai_water/otsu.py`, `pipeline.py` | binary-Otsu (tiled), edge-Otsu, their combination; `WaterConfig`, `map_water` (one scene) |
+| `ai_water/acquire.py` | Planetary Computer `sentinel-1-rtc`: STAC search + cache, signing, best orbit per pass direction, 10 m reads, `iter_scenes` |
+| `ai_water/speckle.py`, `preprocess.py`, `scene.py` | `refined_lee`, `lee`; linear <-> dB; one scene -> filtered VV / VH dB and SDWI, GeoTIFF writer |
+| `ai_water/features.py` | the 14 model channels: SDWI, terrain derivatives, range slope, land-cover groups, patch cutting |
+| `ai_water/terrain.py` | DEM and WorldCover from Earth Engine onto a site grid, cached per grid |
 | `ai_water/sites.py` | `Site`, the default (Angat Dam), CSV / vector-file loaders, minimum size, UTM zone, `resolve_aoi`, `load_training_sites` |
 | `ai_water/aoi.py` | rasterise a site's outline to clip results |
-| `ai_water/batch.py` | `map_sites`: many sites, resumable, per-site failure isolation, `areas.csv`, frequency composite |
+| `ai_water/batch.py` | `map_sites`: many sites, resumable, per-site failure isolation, `areas.csv`, per-direction frequency composite |
 | `ai_water/nationwide.py` | country boundary, tiles, JRC pre-screen, `run_nationwide`, index, monthly national totals |
-| `ai_water/jrc.py`, `labels.py`, `dataset.py` | JRC from Earth Engine, same-month matching, tiered labels, per-scene `.npz` + `manifest.jsonl`, patches, site splits |
-| `ai_water/terramind_seg.py` | `TerraMindWater` model, training, sliding-window prediction, `fuse`, checkpoints |
+| `ai_water/jrc.py`, `labels.py`, `dataset.py` | JRC from Earth Engine, same-month matching, terrain-corrected labels, per-scene `.npz` + `manifest.jsonl`, `PatchSet`, site splits |
+| `ai_water/terramind_seg.py` | `TerraMindWater` model, training, sliding-window prediction, checkpoints |
 | `ai_water/infer.py` | `load_model`, `infer_scene`, `iter_window` (any dates), `write_result` |
-| `ai_water/pseudo_labels.py`, `synthetic.py` | Otsu-only labels, patches, TerraMind normalisation; synthetic scenes for the tests |
+| `ai_water/synthetic.py` | synthetic scenes (including a valley with radar shadow) and stand-ins for the tests |
 | `data/training_sites.csv` | the six training water bodies |
 | `models/` | the small trained model and its model card (see below) |
-| `scripts/` | `build_dataset.py`, `train_terramind.py`, `map_water.py`, `run_angat.py` |
+| `scripts/` | `build_dataset.py`, `train_terramind.py`, `map_water.py` |
 | `notebooks/` | `ai_water_training.ipynb`, `ai_water_inference.ipynb` |
 | `tests/` | offline tests (synthetic data; Earth Engine and Planetary Computer replaced by stand-ins) |
 
@@ -135,24 +163,18 @@ python scripts/run_angat.py --start 2024-01-01 --end 2024-12-31 --out outputs/an
 
 Boxes smaller than 5 km on a side are expanded about their centre (and the note says so): the model looks at 2.2 km patches and needs context, and a 1.4 km box would give no
 training patches at all. One site (La Mesa Dam by default, `HOLDOUT`) is held out of training and used for validation: the honest test of how the model carries over to a water body it
-has never seen. Add water bodies by adding rows. The rivers are the hardest case: a river a few pixels wide is mostly mixed pixels at 10 m.
+has never seen. Add water bodies by adding rows; **rows on steep terrain are what teach the model about shadow**. The rivers are the hardest case: a river a few pixels wide is mostly
+mixed pixels at 10 m.
 
 ## Design notes
 
 **Acquisition** follows `Leads-DigiSaka-System/ai-irrigation` (`stac_data.py`, `sar.py`): `sentinel-1-rtc` via `pystac-client`, `odc-stac` onto an explicit geobox, URLs signed at read
-time, retry/back-off on rate limits, STAC results cached on disk, one relative orbit + pass direction so geometry is constant. Differences: it is read at the native **10 m** (the
-irrigation project averages to 100 m, which would erase a reservoir shoreline), and an orbit day counts only if one pass covers >= 90 % of the area, so one threshold serves the
-whole water body.
+time, retry/back-off on rate limits, STAC results cached on disk. Per pass direction (ascending, descending) it keeps one relative orbit, so the viewing geometry is constant within a
+direction. Differences: it is read at the native **10 m** (the irrigation project averages to 100 m, which would erase a reservoir shoreline), and an orbit day counts only if one pass
+covers >= 90 % of the area, so the whole water body is judged from one image.
 
-**Speckle**: `refined_lee` (Lee 1981: 7x7 window, 3x3 sub-windows, 8 half-window directions), `lee`, `multitemporal_mean`. Filtering is always in linear power; dB comes afterwards.
-
-**Thresholds**
-- *binary-Otsu*: per tile, keeping only clearly bimodal tiles (Ashman's D, between-class variance, water share), median of the tile thresholds. Global Otsu is only a fallback.
-- *edge-Otsu* (Donchyts et al. 2016): Canny edges, buffered, Otsu on the pixels inside the buffer. Works when water is a small part of the scene.
-- Both must pass a **contrast gate** (classes >= 4 dB apart). Without it, edge-Otsu locks onto land-texture edges in scenes with little water (in synthetic tests IoU collapsed from
-  0.99 to 0.05).
-- *Combination*: thresholds within 3 dB bracket an **uncertain band**; band pixels become water only when connected to pixels both methods call water (hysteresis). If they disagree
-  by more, the edge threshold is used alone. If neither is valid the scene has no water, instead of splitting the land histogram.
+**Speckle**: `refined_lee` (Lee 1981: 7x7 window, 3x3 sub-windows, 8 half-window directions), `lee`, `multitemporal_mean`. Filtering is always in linear power; dB and SDWI come afterwards.
+VV decides which pixels are valid (border noise); VH has a lower floor (-45 dB) because water and shadow can be darker than -30 dB in the cross-polar band.
 
 ## JRC-labelled dataset (date-matched)
 
@@ -161,41 +183,44 @@ from Earth Engine onto the S1 10 m UTM grid (`ee.data.computePixels`, as in ai-i
 `max_month_offset = 0` (default) never borrows a neighbouring month, and the offset used is stored per scene. A month with too little Landsat coverage makes the scene `no_jrc_month`
 rather than falling back silently.
 
-Labels exist only where JRC and the same-date Otsu map are consistent (`labels.jrc_otsu_labels`):
+JRC is independent of the radar, so shadow and wet soil cannot leak into the labels. The radar only audits the labels (`labels.jrc_labels`):
 
-| JRC (S1 month) | Otsu (S1 date) | Label |
+| JRC (S1 month) | Terrain / radar | Label |
 |---|---|---|
-| water | water | water |
-| not water | land | land |
-| water / not water | uncertain band | JRC decides |
-| water / not water | contradicts | **ignored**, counted as a conflict |
-| within 3 px (30 m) of the JRC shoreline | water / land | Otsu decides (10 m; JRC is a Landsat pixel coarser) |
-| no data | any | ignored |
+| water | slope <= 15 deg | water (`jrc_water`) |
+| water | slope > 15 deg | **ignored** (`terrain_ignored`): open water is flat; usually Landsat topographic shadow |
+| not water | VV >= -18 dB | land (`jrc_land`) |
+| not water | VV < -18 dB | land, recorded as a **hard negative**: shadow, wet soil, smooth bare ground |
+| within 3 px (30 m) of the JRC shoreline | any | ignored (JRC is a Landsat pixel coarser; the model sharpens the edge from the 10 m radar) |
+| no data (JRC or radar) | any | ignored |
 
-Every labelled pixel keeps its source (`agree`, `jrc_resolved`, `otsu_edge`, `never_water`), and each scene stores its JRC-Otsu **agreement**. A scene is used for training only if
-agreement >= 0.9, JRC no-data <= 40 % and it has a real water body. Rejected scenes stay in `manifest.jsonl` with the reason (`jrc_nodata`, `low_agreement`, `few_water_px`,
-`no_jrc_month`). Low agreement means the JRC month does not match the S1 date (the reservoir moved) or Otsu failed.
+A scene is used for training only if it has a real water body (>= 2000 labelled water px), JRC no-data <= 40 %, and the JRC-water pixels are at least **5 dB darker** in VV than the ordinary
+JRC-land pixels (hard negatives excluded, so a shadowed hillside does not hide the contrast). Low contrast means the JRC month does not match the pass (the reservoir moved) or the water
+was too rough for the radar. Rejected scenes stay in `manifest.jsonl` with the reason (`jrc_nodata`, `few_water_px`, `low_contrast`, `no_jrc_month`). The thresholds (15 deg, -18 dB, 5 dB)
+are starting points, not calibrated values: they are arguments of `DatasetConfig`, the notebook and `scripts/build_dataset.py`.
 
 - JRC GSW1_4 ends in **Dec 2021** and S1 RTC starts in 2017: labelled dates are 2017-2021. The model then maps any later date.
-- `never_water_negatives` (off) relabels "JRC never water but S1 water" as land: it removes radar-shadow errors but also teaches that real new floods and flooded paddies are land.
-- `load_patches` keeps only a share (`keep_empty`) of near-waterless patches so water is not drowned in land, caps the patches per scene and stores them as float16, so the full
-  dataset fits in Colab memory.
+- The labels inherit JRC's errors (Landsat clouds, 30 m, monthly): a flood that came and went inside the month is land or water in the whole month.
+- `load_patches` keeps only a share (`keep_empty`) of near-waterless patches so water is not drowned in land, but keeps every patch with hard negatives; it caps the patches per scene
+  and stores the three S1 channels as float16, cutting the terrain channels from the site raster per batch, so the dataset fits in Colab memory.
 
 **If the dataset table cell fails** (`manifest.jsonl is empty` / `all N scenes were rejected` / `does not exist`), the message names the likely cause. Empty means the dataset step read
 no Sentinel-1 scene: look for `unreadable` lines or a Planetary Computer token / rate-limit error in the output (set `PC_SDK_SUBSCRIPTION_KEY`), and check the dates and the site box.
-All rejected means JRC and Otsu did not agree on any scene (`low_agreement`: try `MAX_MONTH_OFFSET = 1`), or JRC had no coverage (`no_jrc_month`, `jrc_nodata`).
+All rejected means JRC and the radar did not fit on any scene (`low_contrast`: try `MAX_MONTH_OFFSET = 1`), or JRC had no coverage (`no_jrc_month`, `jrc_nodata`).
 
 ## Model, validation and mapping
 
 **Model** (`terramind_seg.TerraMindWater`): TerraMind encoder with the **`S1RTC`** modality (Planetary Computer serves terrain-corrected gamma0; its normalisation differs from S1GRD: mean
--10.93/-17.33 dB, std 4.39/4.46, from terratorch 1.2.13), a multi-layer token decoder, and a small convolutional stem on the pixels (the ViT works on 16 px tokens). The encoder is frozen by
-default (`UNFREEZE_LAST = N` also trains the last blocks). Loss: cross-entropy over labelled pixels + Dice. Sizes: `terramind_v1_tiny | small | base | large`.
+-10.93/-17.33 dB, std 4.39/4.46, from terratorch 1.2.13), a multi-layer token decoder, and a convolutional stem on all 14 channels (the ViT works on 16 px tokens; the stem keeps shorelines
+sharp and carries the terrain). The encoder is frozen by default (`UNFREEZE_LAST = N` also trains the last blocks). Loss: cross-entropy over labelled pixels + Dice. Sizes:
+`terramind_v1_tiny | small | base | large`. A checkpoint records its channel list; one trained with the old 2-channel design is refused with a message to retrain.
 
 **Validation**: `HOLDOUT` keeps whole sites out of training; without it an east-strip block of every scene is held out so overlapping patches never straddle the split. IoU is measured
-against the **training labels**, so it says how well the model reproduces JRC x Otsu on unseen data, not how close it is to reality.
+against the **training labels**, so it says how well the model reproduces JRC on unseen data, not how close it is to reality.
 
-**Mapping** (`infer.infer_scene`): Otsu classes, TerraMind P(water) by overlapping tiles, then `fuse`. Otsu keeps the 10 m boundary where it is certain, the model decides the uncertain band,
-and strong disagreements are **flagged** instead of overridden: `model-only` (candidate flooded vegetation / shallow water) and `Otsu-only`. Areas are counted inside the water body's outline.
+**Mapping** (`infer.infer_scene`): VV/VH/SDWI + terrain -> P(water) by overlapping tiles -> water where P >= `THRESHOLD`. The model decides. As a last safeguard, water on ground steeper than
+`MAX_SLOPE_DEG` (25 deg, well above the DEM slope at a steep shoreline) is removed and flagged `2` so it can be reviewed; set it to `None` to see the raw model. Areas are counted inside the
+water body's outline, per pass direction.
 
 ## Saving and sharing the model
 
@@ -210,25 +235,25 @@ Training writes two checkpoints plus the history:
 `infer.load_model(path)` (or `terramind_seg.load_checkpoint`) loads either. The small file rebuilds the pretrained encoder from Hugging Face and puts the trained weights on top, so it needs
 network access and the **same pretrained encoder** the model was trained with (it refuses a file that does not fit). The training notebook reloads both files and checks that they reproduce
 the trained model's output, then copies the small checkpoint and a model card (`models/terramind_water_decoder.json`) into `models/`. To publish: `git add models/ && git commit && git push`.
-For the full 346 MB file use Git LFS, a GitHub Release or the Hugging Face Hub.
+For the full 346 MB file use Git LFS, a GitHub Release or the Hugging Face Hub. **No trained model is committed yet**: the earlier 2-channel model was never kept, and this design needs
+retraining on the real data.
 
 ## Verification status
 
 | Part | Status |
 |---|---|
-| Refined Lee, edge/binary Otsu, combination, classes | Tested on synthetic speckled scenes: speckle CV 0.50 -> 0.22, IoU >= 0.99 for 2-30 % water, no false lake on a land-only scene |
-| JRC matching, tiered labels, dataset build/load, resume, site hold-out, Earth Engine request blocks | Tested offline with a synthetic JRC (30 m blocks, cloud gaps, wrong-month water level) and a mocked `ee`: labels >= 99.5 % pure, radar-shadow conflicts ignored, wrong-month scenes rejected |
-| Sites: your six boxes, corners format, minimum size, UTM zone, CSV and GeoJSON loading, `resolve_aoi`, error messages | Tested (the six sites load as supplied; Sampaloc Lake is expanded; swapped lat/lon, duplicates, a multi-feature file without `multiple`, a projected GeoJSON are all refused with a clear message). GeoPackage / Shapefile / KML loading goes through `geopandas` and is **not** tested here (it is not installed in the build environment) |
-| Batch mapping: outline clipping, resume, failure isolation, frequency composite | Tested with Planetary Computer replaced by a stand-in: areas count only inside the outline, an interrupted run reads only the new passes, a failing site is recorded while the others finish, the composite equals the share of dates with water |
-| Nationwide: tiles, pre-screen, run, index, monthly totals | Tested: the tiles' land clips add up exactly to the land outline, slivers are dropped, pre-screen ignores water outside the land, a run maps tiles and isolates a failing one. The **Earth Engine country boundary** (`USDOS/LSIB_SIMPLE/2017`, `country_na`) was written from memory and not run: pass your own boundary file |
-| TerraMind training, prediction, fusion, checkpoints, mapping | Run end to end with a tiny **randomly initialised** model on synthetic data; both notebooks were executed top to bottom (training on your six sites with a held-out site, inference in single / single-with-vector / multiple / nationwide modes) with only the network entry points replaced by stand-ins. Outputs are not stored in the repository |
-| **Earth Engine / JRC reads** (`jrc.GeeJrc`), **Planetary Computer** (`acquire.load_s1`, `iter_scenes`) | **Not run against the live services** from the build sandbox. Planetary Computer search and Earth Engine authentication were confirmed from your Colab run; the JRC band name was corrected after it (`water`), and the JRC reads themselves are the next thing to confirm |
-| Pretrained TerraMind weights, accuracy on real scenes | **Not run**: Hugging Face was blocked. No real-world accuracy has been measured |
+| Refined Lee, SDWI, DEM derivatives (slope, aspect, relief), range slope, land-cover groups, the channel stack | Tested on synthetic data and analytic cases (a tilted plane has the right slope and aspect, the radar-look slope flips sign between the two geometries, water is never a land-cover group) |
+| JRC matching, labels, dataset build/load, resume, site hold-out, Earth Engine request blocks | Tested offline with a synthetic JRC (30 m blocks, cloud gaps, wrong-month water level), a synthetic valley with radar shadow, and a mocked `ee`: shadow becomes a hard negative, JRC water on steep ground is ignored, wrong-month scenes are rejected |
+| Both pass directions: orbit choice, scene streaming, resume, composite | Tested: the best orbit of each direction is chosen, scenes stream in date order, the minimum of the two directions' frequencies removes the shadow that is water-like in only one |
+| Sites, area selection, batch mapping, nationwide tiling/pre-screen/index | Tested as before, with Planetary Computer, Earth Engine and the model replaced by stand-ins. GeoPackage / Shapefile / KML loading goes through `geopandas` and is **not** tested here. The **Earth Engine country boundary** (`USDOS/LSIB_SIMPLE/2017`, `country_na`) was written from memory and not run: pass your own boundary file |
+| TerraMind model, training, checkpoints, terrain safeguard | Run with a tiny **randomly initialised** model on synthetic data. On synthetic valleys, a model trained with the terrain channels learns that the dark shadowed flank is not water in both geometries |
+| Notebooks | Executed top to bottom with only the network entry points replaced by stand-ins (see the commit message for the exact run). Outputs are not stored in the repository |
+| **Earth Engine reads of the DEM and WorldCover** (`terrain.GeeTerrain`: `COPERNICUS/DEM/GLO30` band `DEM`, `ESA/WorldCover/v200` band `Map`), **JRC reads** (`jrc.GeeJrc`), **Planetary Computer** (`acquire.load_s1`, `iter_scenes`) | **Not run against the live services** from the build sandbox. The asset ids and band names were written from memory and are looked up at run time, so a mismatch fails with the list of real bands. Planetary Computer search and Earth Engine authentication were confirmed from your Colab run |
+| Pretrained TerraMind weights, accuracy on real scenes | **Not run**: Hugging Face was blocked. No real-world accuracy has been measured, and whether the terrain channels remove the streaks on the real Angat map is unconfirmed until you retrain and map |
 
 ## Before trusting results
 
-- Validate against an independent reference: a clear Sentinel-2 NDWI/MNDWI date close to the pass, OPERA DSWx, or hand-checked patches. Watch the `agreement` column and the
-  `model-only` / `Otsu-only` flags: they show where sources disagree.
-- Radar shadow and layover on steep terrain around reservoirs give false water; a HAND/slope mask is not included yet.
-- A nationwide run is a long job (one Sentinel-1 read per tile and date): try a region first (`--bbox`), and keep `PRESCREEN` on.
-- `terramind_seg.refine_threshold` is an experimental heuristic and depends on the model's quality.
+- Validate against an independent reference: a clear Sentinel-2 NDWI/MNDWI date close to the pass, OPERA DSWx, or hand-checked patches. Compare `frequency_ascending.tif` with
+  `frequency_descending.tif`: a streak that is bright in only one of them is shadow.
+- The hard-negative thresholds and the 25 deg safeguard are untuned defaults. A reservoir with steep banks and no steep training site will still be a weak case.
+- A nationwide run is a long job (one Sentinel-1 read per tile, date and direction): try a region first (`--bbox`), and keep `PRESCREEN` on.

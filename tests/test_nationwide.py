@@ -13,7 +13,7 @@ from shapely.geometry import box as sbox, mapping  # noqa: E402
 from shapely.ops import unary_union  # noqa: E402
 
 from ai_water import batch, infer, jrc, nationwide, sites, synthetic as syn  # noqa: E402
-from test_batch import N, RES, X0, Y1, geobox, lonlat_box  # noqa: E402
+from test_batch import FLAT, N, RES, X0, Y1, FakeModel, geobox, lonlat_box  # noqa: E402
 
 
 # ------------------------------------------------------------------ boundary
@@ -112,7 +112,7 @@ def test_prescreen_counts_water_inside_the_land_outline_only():
 def _stub_iter_window(monkeypatch, broken=()):
     reads = []
 
-    def iter_window(st, start, end, water_cfg=None, cache_dir=None, log=print, skip_days=None):
+    def iter_window(st, start, end, scene_cfg=None, cache_dir=None, log=print, skip_days=None):
         if st.name in broken:
             raise RuntimeError("no Sentinel-1 RTC pass covers this tile")
         g = jrc.grid_for_bbox(st.bbox, st.crs, RES)                                # a N x N scene at this tile's north-west corner
@@ -121,10 +121,10 @@ def _stub_iter_window(monkeypatch, broken=()):
 
         def gen():
             for day, s in zip(("2024-01-10", "2024-02-03"), sc):
-                if skip_days and day in skip_days:
+                if skip_days and f"{day}:descending" in skip_days:
                     continue
                 reads.append((st.name, day))
-                yield day, s["vv"], s["vh"]
+                yield day, "descending", s["vv"], s["vh"]
         return gb, gen()
     monkeypatch.setattr(infer, "iter_window", iter_window)
     return reads
@@ -137,15 +137,15 @@ def test_run_nationwide_maps_tiles_isolates_failures_and_writes_the_index(tmp_pa
     inner = (cx - 0.1, cy - 0.1, cx + 0.1, cy + 0.1)                               # run only the tiles around its middle (all land)
     bad = nationwide.make_tiles(boundary, 0.18, 0.0, bbox=inner)[1].name
     _stub_iter_window(monkeypatch, broken={bad})
-    cfg = batch.MapConfig(start="2024-01-01", end="2024-03-01", out_dir=str(tmp_path), cache_dir=str(tmp_path / "c"), write=())
-    res, tiles, idx = nationwide.run_nationwide(None, boundary, cfg, margin_km=0.0, bbox=inner, limit_tiles=3, log=lambda *_: None)
+    cfg = batch.MapConfig(start="2024-01-01", end="2024-03-01", out_dir=str(tmp_path), cache_dir=str(tmp_path / "c"), write=(), terrain_source=FLAT)
+    res, tiles, idx = nationwide.run_nationwide(FakeModel(), boundary, cfg, margin_km=0.0, bbox=inner, limit_tiles=3, log=lambda *_: None)
     assert len(tiles) == 3 and [f["site"] for f in res.failures] == [bad]
-    assert set(res.areas["site"]) == {t.name for t in tiles} - {bad} and (res.areas["fused_km2"] > 0).all()
+    assert set(res.areas["site"]) == {t.name for t in tiles} - {bad} and (res.areas["water_km2"] > 0).all()
     gj = json.load(open(idx))
     status = {f["properties"]["tile"]: f["properties"] for f in gj["features"]}
     assert status[bad]["status"] == "failed" and "no Sentinel-1 RTC pass" in status[bad]["error"]
     ok = [p for t, p in status.items() if t != bad]
-    assert all(p["status"] == "ok" and p["n_dates"] == 2 and p["mean_fused_km2"] > 0 for p in ok)
+    assert all(p["status"] == "ok" and p["n_scenes"] == 2 and p["mean_water_km2"] > 0 for p in ok)
     assert all((tmp_path / t / "frequency.tif").exists() for t in status if t != bad)
 
 
@@ -154,8 +154,8 @@ def test_run_nationwide_with_prescreen_only_maps_wet_tiles(tmp_path, monkeypatch
     cx, cy = 0.5 * (w + e), 0.5 * (s + n)
     boundary = sbox(cx - 0.2, cy - 0.2, cx + 0.2, cy + 0.2)
     reads = _stub_iter_window(monkeypatch)
-    cfg = batch.MapConfig(start="2024-01-01", end="2024-03-01", out_dir=str(tmp_path), cache_dir=str(tmp_path / "c"), write=())
-    res, tiles, idx = nationwide.run_nationwide(None, boundary, cfg, margin_km=0.0, jrc_source=OccAlternating(), min_water_frac=0.02,
+    cfg = batch.MapConfig(start="2024-01-01", end="2024-03-01", out_dir=str(tmp_path), cache_dir=str(tmp_path / "c"), write=(), terrain_source=FLAT)
+    res, tiles, idx = nationwide.run_nationwide(FakeModel(), boundary, cfg, margin_km=0.0, jrc_source=OccAlternating(), min_water_frac=0.02,
                                                 log=lambda *_: None)
     total = len(nationwide.make_tiles(boundary, 0.18, 0.0))
     assert 0 < len(tiles) < total and {t for t, _ in reads} == {t.name for t in tiles}
@@ -165,11 +165,11 @@ def test_run_nationwide_with_prescreen_only_maps_wet_tiles(tmp_path, monkeypatch
 # ------------------------------------------------------------------ totals
 def test_monthly_national_area_averages_passes_within_a_tile_then_sums_tiles():
     a = pd.DataFrame([
-        {"site": "t1", "date": "2024-01-05", "fused_km2": 10.0, "otsu_km2": 9.0},
-        {"site": "t1", "date": "2024-01-17", "fused_km2": 14.0, "otsu_km2": 13.0},       # t1 January mean 12
-        {"site": "t2", "date": "2024-01-09", "fused_km2": 5.0, "otsu_km2": 4.0},
-        {"site": "t1", "date": "2024-02-02", "fused_km2": 11.0, "otsu_km2": 10.0}])
+        {"site": "t1", "date": "2024-01-05", "water_km2": 10.0},
+        {"site": "t1", "date": "2024-01-17", "water_km2": 14.0},                          # t1 January mean 12
+        {"site": "t2", "date": "2024-01-09", "water_km2": 5.0},
+        {"site": "t1", "date": "2024-02-02", "water_km2": 11.0}])
     m = nationwide.monthly_national_area(a).set_index("month")
-    assert m.loc["2024-01", "fused_km2"] == 17.0 and m.loc["2024-01", "n_tiles"] == 2
-    assert m.loc["2024-02", "fused_km2"] == 11.0 and m.loc["2024-02", "n_tiles"] == 1          # undercount is visible, not hidden
+    assert m.loc["2024-01", "water_km2"] == 17.0 and m.loc["2024-01", "n_tiles"] == 2
+    assert m.loc["2024-02", "water_km2"] == 11.0 and m.loc["2024-02", "n_tiles"] == 1          # undercount is visible, not hidden
     assert nationwide.monthly_national_area(a.iloc[0:0]).empty

@@ -1,15 +1,19 @@
 """Map many water bodies in one call: resumable, and one site failing never stops the others.
 
-For every site and every Sentinel-1 date in a window: Otsu + TerraMind + fusion (`infer.infer_scene`), restricted to the site's
-outline when it has one (`aoi.aoi_mask`). Writes under `<out_dir>/<site>/`:
+For every site and every Sentinel-1 date in a window, ascending and descending passes alike: features (VV, VH, SDWI, terrain, land
+cover) -> TerraMind -> water (`infer.infer_scene`), restricted to the site's outline when it has one (`aoi.aoi_mask`). Writes under
+`<out_dir>/<site>/`:
 
-    <date>_fused_water.tif, <date>_flags.tif ...   per scene (what `MapConfig.write` lists; () for none)
-    frequency.tif   % of the valid observations on which each pixel was water (255 = never observed)
-    n_obs.tif       number of valid observations per pixel
-    state.npz       the running composite and the dates done, so an interrupted run resumes without re-reading any pass
+    <date>_<orbit>_water.tif, ..._flags.tif ...   per scene (what `MapConfig.write` lists; () for none)
+    frequency.tif   % of the valid observations on which each pixel was water (255 = never observed). With both pass directions
+                    it is the pixel-wise MINIMUM of the two directions' frequencies: radar shadow sits on different slopes in
+                    the two geometries, so a pixel that is 'water' in only one of them is shadow, not water
+    frequency_ascending.tif, frequency_descending.tif   the per-direction frequencies, when both directions were observed
+    n_obs.tif       number of valid observations per pixel (both directions)
+    state.npz       the running composite and the scenes done, so an interrupted run resumes without re-reading any pass
 
-and, for all sites together, `<out_dir>/areas.csv` (one row per site and date: Otsu / fused water area in km2, the model-only /
-Otsu-only candidate areas, the observed area, the Otsu mode) and `<out_dir>/failures.csv`.
+and, for all sites together, `<out_dir>/areas.csv` (one row per site, date and orbit: water area in km2, the area the terrain rule
+removed, the observed area) and `<out_dir>/failures.csv`.
 """
 from __future__ import annotations
 
@@ -21,9 +25,10 @@ from dataclasses import dataclass, field
 import numpy as np
 import pandas as pd
 
-from . import aoi, infer, pipeline
+from . import acquire, aoi, infer, jrc, scene as sc, terrain as tr
 
-AREA_COLUMNS = ["site", "label", "kind", "date", "otsu_km2", "fused_km2", "model_only_km2", "otsu_only_km2", "valid_km2", "otsu_mode"]
+AREA_COLUMNS = ["site", "label", "kind", "date", "orbit", "water_km2", "terrain_suppressed_km2", "valid_km2"]
+STATES = acquire.ORBIT_STATES
 
 
 @dataclass
@@ -31,15 +36,19 @@ class MapConfig:
     start: str = "2024-01-01"
     end: str = "2024-12-31"
     out_dir: str = "outputs/maps"
-    write: tuple = ("fused_water", "flags")      # per-scene GeoTIFFs: any of otsu_classes, fused_water, flags, prob; () = none
-    composite: bool = True                       # frequency.tif / n_obs.tif per site
-    resume: bool = True                          # skip dates already done
+    write: tuple = ("water", "flags")            # per-scene GeoTIFFs: any of water, flags, prob; () = none
+    composite: bool = True                       # frequency*.tif / n_obs.tif per site
+    resume: bool = True                          # skip scenes already done
     stop_on_error: bool = False                  # False: record the failure and go on with the next site
     tile: int = 224                              # TerraMind tile (multiple of 16) and overlap
     overlap: int = 56
+    threshold: float = 0.5                       # probability at which a pixel is water
+    max_slope_deg: float = infer.MAX_SLOPE_DEG   # terrain safeguard, None = off (see infer.infer_scene)
+    use_landcover: bool = True
     device: str = None
     cache_dir: str = "cache"
-    water: pipeline.WaterConfig = field(default_factory=pipeline.WaterConfig)
+    scene: sc.SceneConfig = field(default_factory=sc.SceneConfig)
+    terrain_source: object = None                # .dem(grid) / .landcover(grid); None = Earth Engine (terrain.GeeTerrain)
 
 
 @dataclass
@@ -55,12 +64,12 @@ class MapResult:
 
 # ---------------------------------------------------------------------------------------- bookkeeping
 def read_areas(out_dir):
-    """areas.csv as a DataFrame, one row per (site, date) (a re-processed date keeps its latest row); empty frame if none."""
+    """areas.csv as a DataFrame, one row per (site, date, orbit) (a re-processed scene keeps its latest row); empty frame if none."""
     path = os.path.join(out_dir, "areas.csv")
     if not os.path.exists(path):
         return pd.DataFrame(columns=AREA_COLUMNS)
     df = pd.read_csv(path)
-    return df.drop_duplicates(["site", "date"], keep="last").reset_index(drop=True)
+    return df.drop_duplicates(["site", "date", "orbit"], keep="last").reset_index(drop=True)
 
 
 def _append_row(path, columns, row):
@@ -74,7 +83,7 @@ def _append_row(path, columns, row):
 
 def _save_state(path, water_count, valid_count, days):
     tmp = path[:-4] + ".tmp.npz"
-    np.savez_compressed(tmp, water_count=water_count, valid_count=valid_count, days=np.array(sorted(days), dtype="U10"))
+    np.savez_compressed(tmp, water_count=water_count, valid_count=valid_count, days=np.array(sorted(days), dtype="U24"))
     os.replace(tmp, path)
 
 
@@ -82,9 +91,23 @@ def _load_state(path, shape):
     if not os.path.exists(path):
         return None
     z = np.load(path)
-    if z["water_count"].shape != tuple(shape):
+    if z["water_count"].shape != (len(STATES),) + tuple(shape):
         return None                                   # the grid changed (other box): start this site again
     return z["water_count"].copy(), z["valid_count"].copy(), {str(d) for d in z["days"]}
+
+
+def composite_frequency(water_count, valid_count):
+    """(combined, per-state list) water frequency in % (uint8, 255 = never observed) from counts shaped (states, h, w).
+    Combined = the minimum over the pass directions that observed the pixel (see module docstring)."""
+    per = []
+    for k in range(water_count.shape[0]):
+        v = valid_count[k]
+        per.append(np.where(v > 0, 100.0 * water_count[k] / np.maximum(v, 1), np.nan))
+    stack = np.stack(per)
+    with np.errstate(all="ignore"):
+        comb = np.nanmin(np.where(np.isnan(stack), np.inf, stack), axis=0)
+    comb = np.where(np.isinf(comb), 255, np.round(comb)).astype(np.uint8)
+    return comb, [np.where(np.isnan(p), 255, np.round(p)).astype(np.uint8) for p in per]
 
 
 # ---------------------------------------------------------------------------------------- one site
@@ -100,40 +123,48 @@ def map_site(site, model, cfg: MapConfig, log=print):
             done = {str(d) for d in np.load(state_path)["days"]}
         elif not cfg.composite:
             prev = read_areas(cfg.out_dir)
-            done = set(prev.loc[prev["site"] == site.name, "date"].astype(str))
-    gb, scenes = infer.iter_window(site, cfg.start, cfg.end, cfg.water, cache_dir=cfg.cache_dir, log=log, skip_days=done)
+            p = prev[prev["site"] == site.name]
+            done = {acquire.scene_key(d, o) for d, o in zip(p["date"], p["orbit"])}
+    gb, scenes = infer.iter_window(site, cfg.start, cfg.end, cfg.scene, cache_dir=cfg.cache_dir, log=log, skip_days=done)
     inside = aoi.aoi_mask(site, gb)
+    terrain = tr.site_terrain(jrc.grid_from_geobox(gb), cfg.terrain_source or tr.GeeTerrain(), cfg.cache_dir, cfg.use_landcover)
 
     state = _load_state(state_path, gb.shape) if (cfg.resume and cfg.composite) else None
     if state is None:
-        wc, vc, days = np.zeros(gb.shape, np.uint16), np.zeros(gb.shape, np.uint16), set()
+        wc = np.zeros((len(STATES),) + tuple(gb.shape), np.uint16)
+        vc, days = np.zeros_like(wc), set()
         if done and cfg.composite:
             log(f"[{site.name}] state does not match this grid: composite restarts, earlier per-scene outputs are kept")
     else:
         wc, vc, days = state
-    res_m, rows = cfg.water.resolution_m, []
-    for day, vv, vh in scenes:
+    res_m, rows = cfg.scene.resolution_m, []
+    for day, orbit, vv, vh in scenes:
         stamp = str(pd.Timestamp(str(day)).date())
-        res = infer.infer_scene(vv, vh, model, cfg.water, tile=cfg.tile, overlap=cfg.overlap, device=cfg.device)
+        res = infer.infer_scene(vv, vh, orbit, terrain, model, cfg.scene, tile=cfg.tile, overlap=cfg.overlap, device=cfg.device,
+                                threshold=cfg.threshold, max_slope_deg=cfg.max_slope_deg, use_landcover=cfg.use_landcover)
         a = res.area_km2(res_m, inside)
-        valid = np.isfinite(res.vv_db) if inside is None else (np.isfinite(res.vv_db) & inside)
+        valid = res.valid if inside is None else (res.valid & inside)
         if cfg.write:
             infer.write_result(sdir, stamp, res, gb, which=cfg.write, mask=inside)
         if cfg.composite:
-            wc += (res.fused_water & valid).astype(np.uint16)
-            vc += valid.astype(np.uint16)
-            days.add(stamp)
+            k = STATES.index(orbit)
+            wc[k] += (res.water & valid).astype(np.uint16)
+            vc[k] += valid.astype(np.uint16)
+            days.add(acquire.scene_key(stamp, orbit))
             _save_state(state_path, wc, vc, days)
-        row = {"site": site.name, "label": site.label, "kind": site.kind, "date": stamp, "otsu_km2": a["otsu"],
-               "fused_km2": a["fused"], "model_only_km2": a["model_only_candidates"], "otsu_only_km2": a["otsu_only_candidates"],
-               "valid_km2": float(valid.sum() * res_m ** 2 / 1e6), "otsu_mode": res.thresholds.mode}
+        row = {"site": site.name, "label": site.label, "kind": site.kind, "date": stamp, "orbit": orbit,
+               "water_km2": a["water"], "terrain_suppressed_km2": a["terrain_suppressed"],
+               "valid_km2": float(valid.sum() * res_m ** 2 / 1e6)}
         _append_row(os.path.join(cfg.out_dir, "areas.csv"), AREA_COLUMNS, row)
         rows.append(row)
-        log(f"  [{site.name}] {stamp}: Otsu {a['otsu']:.2f} km2 | fused {a['fused']:.2f} km2 | mode {res.thresholds.mode}")
+        log(f"  [{site.name}] {stamp} {orbit}: water {a['water']:.2f} km2 (terrain rule removed {a['terrain_suppressed']:.2f} km2)")
     if cfg.composite and int(vc.max()) > 0:
-        freq = np.where(vc > 0, np.round(100.0 * wc / np.maximum(vc, 1)), 255).astype(np.uint8)
-        pipeline._write_tif(os.path.join(sdir, "frequency.tif"), freq, gb, "uint8", 255)
-        pipeline._write_tif(os.path.join(sdir, "n_obs.tif"), vc, gb, "uint16", 0)
+        comb, per = composite_frequency(wc, vc)
+        sc.write_tif(os.path.join(sdir, "frequency.tif"), comb, gb, "uint8", 255)
+        sc.write_tif(os.path.join(sdir, "n_obs.tif"), vc.sum(0), gb, "uint16", 0)
+        if (vc.reshape(len(STATES), -1).max(1) > 0).all():
+            for state_name, p in zip(STATES, per):
+                sc.write_tif(os.path.join(sdir, f"frequency_{state_name}.tif"), p, gb, "uint8", 255)
     return rows
 
 

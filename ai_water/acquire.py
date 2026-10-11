@@ -4,7 +4,8 @@ Follows the pattern of Leads-DigiSaka-System/ai-irrigation (irrigation_pipeline/
   * STAC search with retry / rate-limit back-off and an on-disk cache of the search result;
   * asset URLs signed at read time (so a cached search stays valid), token requests serialised;
   * odc-stac load onto an explicit geobox, frames of one pass fused ('solar_day');
-  * ONE relative orbit + pass direction per area, so the viewing geometry is identical from date to date;
+  * ONE relative orbit per pass direction (the best ascending and the best descending one), so the viewing geometry is identical
+    from date to date within a direction, while radar shadow, which moves with the look direction, is not the same in both;
   * UTC -> local solar day for grouping.
 Differences: terrain-corrected gamma0 is read at the NATIVE 10 m (not averaged to 100 m): the refined-Lee window
 and the shoreline both need the full resolution; speckle is handled by `speckle.py` instead of multilooking.
@@ -175,26 +176,32 @@ def group_by_day(items):
     return out
 
 
-def choose_orbit(items, bbox, min_cover=0.9):
-    """The (relative orbit, pass direction) that covers `bbox` on the most days, counting a day only when that day's
-    frames cover at least `min_cover` of the box (the whole reservoir must be in one image, otherwise two partial
-    scenes give two different thresholds). Returns (key, [items of that orbit]) or (None, [])."""
+ORBIT_STATES = ("ascending", "descending")
+
+
+def choose_orbits(items, bbox, min_cover=0.9, states=ORBIT_STATES):
+    """For each pass direction in `states`, the relative orbit that covers `bbox` on the most days, counting a day only when
+    that day's frames cover at least `min_cover` of the box (the whole water body must be in one image). Returns
+    {state: (relative orbit, [items of that orbit])} with only the directions that have at least one such day. Ascending and
+    descending passes see radar shadow on opposite slopes, so both are kept when the archive has them."""
     from shapely.geometry import box
     from shapely.ops import unary_union
     area = box(*bbox)
     cand = {}
     for it in items:
-        if _footprint(it).intersects(area):
+        if _footprint(it).intersects(area) and orbit_key(it)[1] in states:
             cand.setdefault(orbit_key(it), []).append(it)
-    best, best_score = None, 0
-    for key, its in sorted(cand.items(), key=lambda kv: str(kv[0])):
-        score = sum(1 for g in group_by_day(its).values()
-                    if unary_union([_footprint(i) for i in g]).intersection(area).area / area.area >= min_cover)
-        if score > best_score:
-            best, best_score = key, score
-    if best is None:
-        return None, []
-    return best, sorted(cand[best], key=lambda i: i.datetime)
+    out = {}
+    for state in states:
+        best, best_score = None, 0
+        for key, its in sorted(((k, v) for k, v in cand.items() if k[1] == state), key=lambda kv: str(kv[0])):
+            score = sum(1 for g in group_by_day(its).values()
+                        if unary_union([_footprint(i) for i in g]).intersection(area).area / area.area >= min_cover)
+            if score > best_score:
+                best, best_score = key, score
+        if best is not None:
+            out[state] = (best[0], sorted(cand[best], key=lambda i: i.datetime))
+    return out
 
 
 # ------------------------------------------------------------------ reading
@@ -254,35 +261,46 @@ def load_local_stack(vv_paths, vh_paths=None):
     return np.stack(vv), (np.stack(vh) if vh else None), profile
 
 
-def iter_scenes(bbox, crs, resolution_m, start, end, min_cover=0.9, cache_dir=None, log=print, skip_days=None):
-    """(geobox, generator of (local solar day, vv_lin (h, w), vh_lin (h, w))) for every Sentinel-1 RTC date of ONE orbit
-    that covers the bbox in [start, end]. Scenes are read lazily, one acquisition day at a time. `skip_days` (a set of
-    'YYYY-MM-DD' local solar days) are not read at all: this is how an interrupted run resumes."""
+def iter_scenes(bbox, crs, resolution_m, start, end, min_cover=0.9, cache_dir=None, log=print, skip_days=None,
+                orbits=ORBIT_STATES):
+    """(geobox, generator of (local solar day, orbit state, vv_lin (h, w), vh_lin (h, w))) for every Sentinel-1 RTC date of the
+    best relative orbit of each pass direction in `orbits` that covers the bbox in [start, end], in date order. Scenes are read
+    lazily, one acquisition day at a time. `skip_days` (a set of 'YYYY-MM-DD:state' keys, see `scene_key`) are not read at all:
+    this is how an interrupted run resumes."""
     set_stac_cache(cache_dir)
     items = search_s1(bbox, str(start)[:10], str(end)[:10])
-    key, items = choose_orbit(items, bbox, min_cover)
-    if not items:
+    chosen = choose_orbits(items, bbox, min_cover, orbits)
+    if not chosen:
         raise RuntimeError(f"no Sentinel-1 RTC pass covers {tuple(bbox)} in {str(start)[:10]}..{str(end)[:10]}")
-    days = group_by_day(items)
-    log(f"orbit {key}: {len(items)} items on {len(days)} days")
+    plan = []
+    for state, (rel, its) in chosen.items():
+        days = group_by_day(its)
+        log(f"{state} orbit {rel}: {len(its)} items on {len(days)} days")
+        plan += [(day, state, g) for day, g in days.items()]
+    plan.sort(key=lambda p: (p[0], p[1]))
     gb = make_geobox(bbox, crs, resolution_m)
     lon = 0.5 * (bbox[0] + bbox[2])
 
     def gen():
         n_scenes, n_skipped, n_done = 0, 0, 0
-        for day, its in sorted(days.items()):
-            if skip_days and str(day) in skip_days:
+        for day, state, its in plan:
+            if skip_days and scene_key(day, state) in skip_days:
                 n_done += 1
                 continue
             loaded = load_s1(its, gb, "nearest" if resolution_m <= 10 else "average", log=log)
             if loaded is None:
                 n_skipped += 1
-                log(f"  {day}: no pixels could be read from {len(its)} item(s), skipped")
+                log(f"  {day} {state}: no pixels could be read from {len(its)} item(s), skipped")
                 continue
             times, vv, vh = loaded
             for k in range(len(times)):
                 n_scenes += 1
-                yield solar_dates([times[k]], lon)[0], vv[k], vh[k]
-        log(f"read {n_scenes} scene(s) from {len(days)} day(s)" + (f", {n_skipped} day(s) unreadable" if n_skipped else "")
+                yield solar_dates([times[k]], lon)[0], state, vv[k], vh[k]
+        log(f"read {n_scenes} scene(s) from {len(plan)} acquisition day(s)" + (f", {n_skipped} unreadable" if n_skipped else "")
             + (f", {n_done} already done (resumed)" if n_done else ""))
     return gb, gen()
+
+
+def scene_key(day, state):
+    """Identifier of one acquisition in the manifests and resume sets: 'YYYY-MM-DD:ascending'."""
+    return f"{str(pd.Timestamp(str(day)).date())}:{state}"

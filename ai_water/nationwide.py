@@ -7,7 +7,8 @@
 
 Each tile is a `Site` (kind "tile") with its own UTM zone, so the Philippines' three zones (50-52N) need no special care, and the land
 clip keeps the open sea out of the water areas. Tiles go through `batch.map_sites`, so a nationwide run is resumable and one
-failing tile does not stop the others. Per-tile products: `<out>/<tile>/frequency.tif` (% of valid observations with water),
+failing tile does not stop the others. Per-tile products: `<out>/<tile>/frequency.tif` (% of valid observations with water; min of the
+ascending and descending frequencies),
 `n_obs.tif`, optional per-date masks, and `<out>/areas.csv`; `<out>/index.geojson` lists every tile with its statistics.
 
 What is NOT produced: one national raster. At 10 m the Philippines is ~3 x 10^9 pixels per layer, so the tiles are the product;
@@ -116,7 +117,7 @@ def prescreen(tiles, jrc_source, min_water_frac=0.001, occurrence_min=50.0, res_
 
 # ---------------------------------------------------------------------------------------- index and totals
 def write_index(tiles, result, out_dir, screen=None):
-    """`<out>/index.geojson`: one feature per tile (its box) with status, dates processed, mean / max fused water area (km2), last
+    """`<out>/index.geojson`: one feature per tile (its box) with status, scenes processed, mean / max water area (km2), last
     date and (if a prescreen ran) the JRC water fraction. Returns the path."""
     a = result.areas
     failed = {f["site"]: f["error"] for f in result.failures}
@@ -126,8 +127,8 @@ def write_index(tiles, result, out_dir, screen=None):
         r = a[a["site"] == t.name]
         w, s, e, n = t.bbox
         props = {"tile": t.name, "status": "failed" if t.name in failed else ("ok" if len(r) else "no_data"),
-                 "n_dates": int(len(r)), "mean_fused_km2": round(float(r["fused_km2"].mean()), 4) if len(r) else None,
-                 "max_fused_km2": round(float(r["fused_km2"].max()), 4) if len(r) else None,
+                 "n_scenes": int(len(r)), "mean_water_km2": round(float(r["water_km2"].mean()), 4) if len(r) else None,
+                 "max_water_km2": round(float(r["water_km2"].max()), 4) if len(r) else None,
                  "last_date": str(r["date"].max()) if len(r) else None, "jrc_water_frac": round(frac[t.name], 5) if t.name in frac else None,
                  "error": failed.get(t.name)}
         feats.append({"type": "Feature", "properties": props,
@@ -139,13 +140,13 @@ def write_index(tiles, result, out_dir, screen=None):
 
 
 def monthly_national_area(areas):
-    """National water area per month (km2): each tile's mean over that month's passes, summed over tiles. `n_tiles` says how many
-    tiles were observed: a month with few tiles is an undercount, not a drop in water."""
+    """National water area per month (km2): each tile's mean over that month's passes (both directions), summed over tiles.
+    `n_tiles` says how many tiles were observed: a month with few tiles is an undercount, not a drop in water."""
     if areas.empty:
-        return pd.DataFrame(columns=["month", "n_tiles", "fused_km2", "otsu_km2"])
+        return pd.DataFrame(columns=["month", "n_tiles", "water_km2"])
     d = areas.assign(month=pd.to_datetime(areas["date"]).dt.to_period("M").astype(str))
-    per_tile = d.groupby(["month", "site"])[["fused_km2", "otsu_km2"]].mean().reset_index()
-    out = per_tile.groupby("month").agg(n_tiles=("site", "nunique"), fused_km2=("fused_km2", "sum"), otsu_km2=("otsu_km2", "sum"))
+    per_tile = d.groupby(["month", "site"])[["water_km2"]].mean().reset_index()
+    out = per_tile.groupby("month").agg(n_tiles=("site", "nunique"), water_km2=("water_km2", "sum"))
     return out.reset_index()
 
 
