@@ -1,4 +1,4 @@
-# core (Otsu + speckle + pseudo labels): runs offline
+# core (speckle filters, SDWI, terrain features, labels): runs offline
 numpy
 scipy
 scikit-image

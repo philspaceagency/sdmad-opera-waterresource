@@ -1,4 +1,4 @@
-"""Offline tests of the pure parts of acquisition (orbit choice, solar day) and of the pseudo-label builder."""
+"""Offline tests of the pure parts of acquisition (orbit choice, solar day) and of the iter_scenes wiring."""
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
@@ -8,7 +8,7 @@ import pytest
 pytest.importorskip("shapely")
 from shapely.geometry import box, mapping  # noqa: E402
 
-from ai_water import acquire, otsu, pseudo_labels as pl  # noqa: E402
+from ai_water import acquire  # noqa: E402
 
 BBOX = acquire.ANGAT_BBOX
 
@@ -19,44 +19,32 @@ def _item(orbit, state, when, footprint=(120.5, 14.0, 121.8, 15.5)):
                            datetime=datetime(*when, tzinfo=timezone.utc))
 
 
-def test_choose_orbit_picks_the_orbit_with_most_full_cover_days():
+def test_choose_orbits_picks_the_best_orbit_of_each_pass_direction():
     a = [_item(61, "ascending", (2024, 1, d, 10)) for d in (1, 13, 25)]
+    a2 = [_item(163, "ascending", (2024, 1, d, 10)) for d in (5,)]
     b = [_item(112, "descending", (2024, 1, d, 22)) for d in (4, 16)]
-    partial = [_item(61, "ascending", (2024, 2, d, 10), footprint=(121.2, 14.0, 121.8, 15.5)) for d in (6, 18)]
-    key, items = acquire.choose_orbit(a + b + partial, BBOX, min_cover=0.9)
-    assert key == (61, "ascending") and len(items) == 5  # partial scenes belong to the orbit but are not counted
+    partial = [_item(112, "descending", (2024, 2, d, 10), footprint=(121.2, 14.0, 121.8, 15.5)) for d in (6, 18)]
+    out = acquire.choose_orbits(a + a2 + b + partial, BBOX, min_cover=0.9)
+    assert set(out) == {"ascending", "descending"}
+    assert out["ascending"][0] == 61 and len(out["ascending"][1]) == 3
+    assert out["descending"][0] == 112 and len(out["descending"][1]) == 4      # partial scenes ride along but are not counted
 
 
-def test_choose_orbit_none_when_nothing_covers():
+def test_choose_orbits_keeps_only_the_directions_that_exist_and_can_be_restricted():
+    a = [_item(61, "ascending", (2024, 1, 1, 10))]
+    assert set(acquire.choose_orbits(a, BBOX)) == {"ascending"}
+    b = [_item(112, "descending", (2024, 1, 4, 22))]
+    assert set(acquire.choose_orbits(a + b, BBOX, states=("descending",))) == {"descending"}
+
+
+def test_choose_orbits_empty_when_nothing_covers():
     far = [_item(61, "ascending", (2024, 1, 1, 10), footprint=(100, 0, 101, 1))]
-    assert acquire.choose_orbit(far, BBOX) == (None, [])
+    assert acquire.choose_orbits(far, BBOX) == {}
 
 
 def test_solar_day_rolls_over_for_evening_utc_pass_in_the_philippines():
     d = acquire.solar_dates([np.datetime64("2024-01-01T22:00:00")], 121.1)[0]
     assert str(d) == "2024-01-02"
-
-
-def test_scene_ok_requires_agreement_and_a_real_water_body():
-    good = {"mode": "both", "gap_db": 0.3, "water_px": 50000, "uncertain_px": 100}
-    assert pl.scene_ok(good)
-    assert not pl.scene_ok({**good, "mode": "edge_only"})
-    assert not pl.scene_ok({**good, "gap_db": 2.5})
-    assert not pl.scene_ok({**good, "water_px": 500})
-
-
-def test_patches_ignore_uncertain_and_split_by_block():
-    classes = np.zeros((512, 512), np.uint8)
-    classes[100:300, 100:300] = otsu.CLASS_WATER
-    classes[50:60, 50:60] = otsu.CLASS_UNCERTAIN
-    y = pl.labels_from_classes(classes)
-    assert y[55, 55] == pl.IGNORE and y[150, 150] == 1 and y[0, 0] == 0
-    x = pl.normalise_s1(np.full((512, 512), -12.6, np.float32), np.full((512, 512), -20.3, np.float32))
-    X, Y, corners = pl.extract_patches(x, y, size=128, stride=64, min_valid=0.95)
-    assert X.shape[1:] == (2, 128, 128) and len(corners) == len(Y) > 0
-    tr, va = pl.spatial_split(corners, (512, 512), size=128, val_frac=0.25)
-    assert tr and va and not set(tr) & set(va)
-    assert max(corners[i][1] + 128 for i in tr) <= 384 <= min(corners[i][1] for i in va) + 128
 
 
 # ------------------------------------------------------------------ iter_scenes / iter_s1 wiring (I/O mocked)
@@ -75,16 +63,25 @@ def _patch_io(monkeypatch, items):
     return calls
 
 
-def test_iter_scenes_streams_one_orbit_lazily_with_solar_days(monkeypatch):
+def test_iter_scenes_streams_both_directions_lazily_in_date_order_with_solar_days(monkeypatch):
     items = [_item(61, "ascending", (2019, 3, 5, 10)), _item(61, "ascending", (2019, 3, 17, 22)),
-             _item(112, "descending", (2019, 3, 8, 22))]            # a second, less frequent orbit is not used
+             _item(112, "descending", (2019, 3, 8, 22)),
+             _item(163, "ascending", (2019, 3, 20, 10))]            # a second ascending orbit with fewer days is not used
     calls = _patch_io(monkeypatch, items)
     gb, gen = acquire.iter_scenes(BBOX, "EPSG:32651", 10.0, "2019-03-01", "2019-03-31", cache_dir="c", log=lambda *_: None)
     assert "loaded" not in calls                                    # nothing is read until iterated
     out = list(gen)
-    assert [str(d) for d, _, _ in out] == ["2019-03-05", "2019-03-18"]    # 22:00 UTC pass -> next local day
-    assert out[0][1].shape == (4, 5) and calls["window"] == ("2019-03-01", "2019-03-31") and calls["cache"] == "c"
-    assert all("2019-03-08" not in c for c in calls["loaded"])
+    assert [(str(d), o) for d, o, _, _ in out] == [("2019-03-05", "ascending"), ("2019-03-09", "descending"),
+                                                   ("2019-03-18", "ascending")]       # 22:00 UTC pass -> next local day
+    assert out[0][2].shape == (4, 5) and calls["window"] == ("2019-03-01", "2019-03-31") and calls["cache"] == "c"
+    assert all("2019-03-20" not in c for c in calls["loaded"])
+
+
+def test_iter_scenes_can_be_limited_to_one_direction(monkeypatch):
+    items = [_item(61, "ascending", (2019, 3, 5, 10)), _item(112, "descending", (2019, 3, 8, 22))]
+    _patch_io(monkeypatch, items)
+    _, gen = acquire.iter_scenes(BBOX, "EPSG:32651", 10.0, "2019-03-01", "2019-03-31", log=lambda *_: None, orbits=("descending",))
+    assert [o for _, o, _, _ in gen] == ["descending"]
 
 
 def test_iter_scenes_without_a_covering_pass_raises(monkeypatch):
@@ -115,7 +112,7 @@ def test_iter_scenes_reports_unreadable_days_and_the_final_tally(monkeypatch):
     _, gen = acquire.iter_scenes(BBOX, "EPSG:32651", 10.0, "2019-03-01", "2019-03-31", log=logs.append)
     assert len(list(gen)) == 1
     assert any("2019-03-05" in m and "skipped" in m for m in logs)
-    assert any("read 1 scene(s) from 2 day(s), 1 day(s) unreadable" in m for m in logs)
+    assert any("read 1 scene(s) from 2 acquisition day(s), 1 unreadable" in m for m in logs)
 
 
 def test_iter_scenes_resumes_by_not_reading_days_already_done(monkeypatch):
@@ -123,8 +120,8 @@ def test_iter_scenes_resumes_by_not_reading_days_already_done(monkeypatch):
     calls = _patch_io(monkeypatch, items)
     logs = []
     _, gen = acquire.iter_scenes(BBOX, "EPSG:32651", 10.0, "2019-03-01", "2019-03-31", log=logs.append,
-                                 skip_days={"2019-03-05"})
+                                 skip_days={acquire.scene_key("2019-03-05", "ascending")})
     out = list(gen)
-    assert [str(d) for d, _, _ in out] == ["2019-03-18"]
+    assert [str(d) for d, _, _, _ in out] == ["2019-03-18"]
     assert calls["loaded"] == [["2019-03-17"]]                      # the finished day was never read
     assert any("1 already done (resumed)" in m for m in logs)

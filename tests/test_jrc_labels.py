@@ -1,4 +1,4 @@
-"""JRC date matching, tiered labels, dataset build/load and the Earth Engine request plumbing (all offline)."""
+"""JRC date matching and the Earth Engine request plumbing (all offline)."""
 import json
 from unittest.mock import MagicMock
 
@@ -6,7 +6,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from ai_water import dataset, jrc, labels as lb, otsu, pipeline, pseudo_labels as pl, sites, synthetic as syn
+from ai_water import jrc, synthetic as syn
 
 S = 3  # Landsat 30 m = 3 Sentinel-1 pixels of 10 m
 
@@ -74,123 +74,6 @@ def test_matched_month_outside_jrc_coverage_is_none():
 
 
 # ------------------------------------------------------------------ labels
-def _label_purity(lab, truth):
-    m = lab != pl.IGNORE
-    return float((lab[m] == truth[m]).mean()), int(m.sum())
-
-
-def test_labels_are_nearly_pure_and_more_pure_than_otsu_alone_when_otsu_has_shadow():
-    s = _scene(seed=2)
-    truth = s["truth"]
-    vv = s["vv"].copy()
-    shadow = np.zeros_like(truth)
-    shadow[300:360, 20:120] = True                       # steep-slope shadow on land: dark in S1, land for JRC
-    shadow &= ~truth
-    vv[shadow] = 10 ** (-21 / 10) * np.random.default_rng(0).gamma(4, .25, int(shadow.sum()))
-    wm = pipeline.map_water(vv, s["vh"], pipeline.WaterConfig())
-    assert (wm.water & shadow).sum() > 1000              # Otsu is fooled
-    otsu_only = pl.labels_from_classes(wm.classes)
-    lab, src, st = lb.jrc_otsu_labels(wm.classes, fake_jrc_month(truth))
-    p_otsu, _ = _label_purity(otsu_only, truth)
-    p_new, n = _label_purity(lab, truth)
-    assert p_new > p_otsu and p_new > 0.995 and n > 0.9 * truth.size
-    assert (lab[shadow] != 1).all()                      # no shadow pixel is ever taught as water
-    assert st["conflict_jrc_land_otsu_water_px"] > 1000  # and the conflict is reported
-
-
-def test_never_water_negatives_turn_shadow_into_land_labels():
-    s = _scene(seed=2)
-    truth = s["truth"]
-    classes = np.where(truth, otsu.CLASS_WATER, otsu.CLASS_LAND).astype(np.uint8)
-    shadow = np.zeros_like(truth)
-    shadow[300:340, 20:100] = True
-    shadow &= ~truth
-    classes[shadow] = otsu.CLASS_WATER
-    occ = np.zeros(truth.shape, np.float32)
-    occ[truth] = 90
-    off, _, _ = lb.jrc_otsu_labels(classes, fake_jrc_month(truth), occ, never_water_negatives=False)
-    on, src, st = lb.jrc_otsu_labels(classes, fake_jrc_month(truth), occ, never_water_negatives=True)
-    assert (off[shadow] == pl.IGNORE).all()
-    assert (on[shadow] == 0).all() and (src[shadow] == lb.SRC_NEVER_WATER).all() and st["never_water_px"] > 0
-
-
-def test_uncertain_band_is_decided_by_jrc():
-    truth = np.zeros((60, 60), bool)
-    truth[:, :30] = True
-    classes = np.full(truth.shape, otsu.CLASS_UNCERTAIN, np.uint8)
-    lab, src, _ = lb.jrc_otsu_labels(classes, fake_jrc_month(truth), edge_px=0)
-    assert (lab[:, :30] == 1).all() and (lab[:, 30:] == 0).all() and (src == lb.SRC_JRC_RESOLVED).all()
-    lab2, _, _ = lb.jrc_otsu_labels(classes, fake_jrc_month(truth), edge_px=0, resolve_uncertain=False)
-    assert (lab2 == pl.IGNORE).all()
-
-
-def test_shoreline_band_takes_the_10m_otsu_label_not_the_30m_jrc_one():
-    truth = np.zeros((60, 60), bool)
-    truth[:, :31] = True                                 # shoreline NOT on a 30 m block edge
-    jr = fake_jrc_month(truth)                           # JRC puts it at column 30 or 33
-    classes = np.where(truth, otsu.CLASS_WATER, otsu.CLASS_LAND).astype(np.uint8)
-    lab, src, _ = lb.jrc_otsu_labels(classes, jr, edge_px=3)
-    assert (lab[:, 30] == 1).all() and (lab[:, 31] == 0).all()           # follows Otsu at 10 m
-    assert (src[:, 27:33] == lb.SRC_OTSU_EDGE).all() and (src[:, 33] == lb.SRC_AGREE).all()
-    ign, _, _ = lb.jrc_otsu_labels(classes, jr, edge_px=3, edge_policy="ignore")
-    assert (ign[:, 29:33] == pl.IGNORE).all()
-
-
-def test_jrc_nodata_is_never_labelled():
-    s = _scene(seed=1)
-    cloud = np.zeros_like(s["truth"])
-    cloud[:, :100] = True
-    classes = np.where(s["truth"], otsu.CLASS_WATER, otsu.CLASS_LAND).astype(np.uint8)
-    lab, _, st = lb.jrc_otsu_labels(classes, fake_jrc_month(s["truth"], cloud))
-    assert (lab[cloud] == pl.IGNORE).all() and st["jrc_nodata_frac"] == pytest.approx(cloud.mean())
-
-
-def test_a_jrc_month_from_the_wrong_water_level_drops_agreement():
-    truth = _scene(seed=3, water=0.25)["truth"]
-    lower = _scene(seed=3, water=0.10)["truth"]          # reservoir much lower in the JRC month than on the S1 date
-    classes = np.where(truth, otsu.CLASS_WATER, otsu.CLASS_LAND).astype(np.uint8)
-    _, _, good = lb.jrc_otsu_labels(classes, fake_jrc_month(truth))
-    _, _, bad = lb.jrc_otsu_labels(classes, fake_jrc_month(lower))
-    assert good["agreement"] > 0.99 and bad["agreement"] < 0.9
-    assert lb.scene_quality(good) and not lb.scene_quality(bad)
-
-
-# ------------------------------------------------------------------ dataset
-def _scene_stream(truths_by_day, seed0=0):
-    for k, (day, truth_water) in enumerate(truths_by_day):
-        s = syn.make_scene(shape=(384, 384), water_frac=truth_water, looks=4, seed=seed0 + k)
-        yield day, s["vv"], s["vh"], s["truth"]
-
-
-def test_build_site_writes_usable_scenes_rejects_mismatches_and_loads_patches(tmp_path):
-    cfg = dataset.DatasetConfig(out_dir=str(tmp_path), water=pipeline.WaterConfig(min_area_px=50, fill_holes_px=50))
-    good = syn.make_scene(shape=(384, 384), water_frac=0.2, looks=4, seed=11)
-    wrong = syn.make_scene(shape=(384, 384), water_frac=0.2, looks=4, seed=12)
-    other = syn.make_scene(shape=(384, 384), water_frac=0.06, looks=4, seed=13)   # JRC month shows another extent
-    src = FakeJrc({"2019-05": good["truth"], "2019-06": other["truth"], "2019-07": other["truth"]})
-    scenes = [("2019-05-12", good["vv"], good["vh"]),        # JRC May = this scene          -> usable
-              ("2019-06-05", wrong["vv"], wrong["vh"]),      # JRC June is another level      -> low agreement
-              ("2019-08-02", good["vv"], good["vh"])]        # no JRC data in August          -> rejected
-    site = sites.Site("testsite", (121.0, 15.0, 121.1, 15.1))
-    metas = dataset.build_site(site, cfg, iter(scenes), GRID, src, log=lambda *_: None)
-    assert [m["usable"] for m in metas] == [True, False, False]
-    assert metas[1]["reject_reason"] == "low_agreement" and metas[2]["reject_reason"] == "no_jrc_month"
-    assert (tmp_path / "testsite" / "2019-05-12.npz").exists() and not (tmp_path / "testsite" / "2019-06-05.npz").exists()
-    man = [json.loads(line) for line in (tmp_path / "manifest.jsonl").read_text().splitlines()]
-    assert len(man) == 3 and man[0]["jrc_month"] == "2019-05" and man[0]["month_offset"] == 0
-
-    X, Y, pm = dataset.load_patches(str(tmp_path), size=128, stride=64, keep_empty=1.0)
-    assert X.shape[1:] == (2, 128, 128) and len(pm) == len(Y) > 0 and {m["site"] for m in pm} == {"testsite"}
-    pur, _ = _label_purity(Y, np.zeros(Y.shape, np.uint8))          # sanity: labels exist and contain both classes
-    assert (Y == 1).any() and (Y == 0).any()
-
-
-def test_split_by_holdout_site_and_by_block():
-    metas = [{"site": s, "corner": (0, c), "shape": [384, 384]} for s in ("angat", "magat") for c in (0, 128, 256)]
-    tr, va = dataset.split_patches(metas, 128, holdout_sites=["Magat"])
-    assert {metas[i]["site"] for i in va} == {"magat"} and {metas[i]["site"] for i in tr} == {"angat"}
-    tr, va = dataset.split_patches(metas, 128)
-    assert not set(tr) & set(va) and all(metas[i]["corner"][1] + 128 <= 288 for i in tr)
 
 
 # ------------------------------------------------------------------ Earth Engine request plumbing

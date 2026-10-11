@@ -78,14 +78,12 @@ def init_gee(project=None, high_volume=True, authenticate=False):
     return ee
 
 
-class GeeJrc:
-    """JRC GSW from Earth Engine, resampled by EE (nearest) onto the requested grid, in row blocks that stay under
-    the computePixels size limit."""
+class GeePixels:
+    """Reads Earth Engine images onto a raster grid with `ee.data.computePixels`, in row blocks that stay under the request size
+    limit, retrying transient errors. Subclasses say WHICH image (JRC, DEM, land cover)."""
 
-    def __init__(self, ee_module=None, monthly_asset=MONTHLY_ASSET, occurrence_asset=OCCURRENCE_ASSET,
-                 max_request_mb=30, tries=5):
+    def __init__(self, ee_module=None, max_request_mb=30, tries=5):
         self._ee = ee_module
-        self.monthly_asset, self.occurrence_asset = monthly_asset, occurrence_asset
         self.max_request_mb, self.tries = max_request_mb, tries
         self._bands = {}
 
@@ -95,26 +93,6 @@ class GeeJrc:
             import ee
             self._ee = ee
         return self._ee
-
-    # -- public
-    def month(self, month, grid):
-        """(ny, nx) uint8 water class (0 no data, 1 not water, 2 water) for the calendar month containing `month`."""
-        ee = self.ee
-        band = self._band(self.monthly_asset, ee.ImageCollection(self.monthly_asset).first(), MONTHLY_BANDS)
-        start = pd.Timestamp(month).to_period("M").start_time
-        end = start + pd.offsets.MonthBegin(1)
-        col = ee.ImageCollection(self.monthly_asset).filterDate(start.strftime("%Y-%m-%d"), end.strftime("%Y-%m-%d"))
-        img = col.select(band).mosaic().unmask(0).toUint8()
-        return self._compute(img, grid, band, np.uint8)
-
-    def occurrence(self, grid):
-        """(ny, nx) float32 occurrence 0-100; NaN where JRC has no observation."""
-        ee = self.ee
-        band = self._band(self.occurrence_asset, ee.Image(self.occurrence_asset), OCCURRENCE_BANDS)
-        img = ee.Image(self.occurrence_asset).select(band).unmask(-1).toFloat()
-        a = self._compute(img, grid, band, np.float32)
-        a[a < 0] = np.nan
-        return a
 
     def _band(self, asset, image, candidates):
         """The band of `asset` to use: the first of `candidates` that exists. Asks Earth Engine once per asset (cached)."""
@@ -154,6 +132,35 @@ class GeeJrc:
                 if k < self.tries - 1:
                     _time.sleep(min(30, 2 ** k))
         raise RuntimeError(f"Earth Engine request failed after {self.tries} tries: {last!r}")
+
+
+class GeeJrc(GeePixels):
+    """JRC GSW from Earth Engine, resampled by EE (nearest) onto the requested grid."""
+
+    def __init__(self, ee_module=None, monthly_asset=MONTHLY_ASSET, occurrence_asset=OCCURRENCE_ASSET,
+                 max_request_mb=30, tries=5):
+        super().__init__(ee_module, max_request_mb, tries)
+        self.monthly_asset, self.occurrence_asset = monthly_asset, occurrence_asset
+
+    # -- public
+    def month(self, month, grid):
+        """(ny, nx) uint8 water class (0 no data, 1 not water, 2 water) for the calendar month containing `month`."""
+        ee = self.ee
+        band = self._band(self.monthly_asset, ee.ImageCollection(self.monthly_asset).first(), MONTHLY_BANDS)
+        start = pd.Timestamp(month).to_period("M").start_time
+        end = start + pd.offsets.MonthBegin(1)
+        col = ee.ImageCollection(self.monthly_asset).filterDate(start.strftime("%Y-%m-%d"), end.strftime("%Y-%m-%d"))
+        img = col.select(band).mosaic().unmask(0).toUint8()
+        return self._compute(img, grid, band, np.uint8)
+
+    def occurrence(self, grid):
+        """(ny, nx) float32 occurrence 0-100; NaN where JRC has no observation."""
+        ee = self.ee
+        band = self._band(self.occurrence_asset, ee.Image(self.occurrence_asset), OCCURRENCE_BANDS)
+        img = ee.Image(self.occurrence_asset).select(band).unmask(-1).toFloat()
+        a = self._compute(img, grid, band, np.float32)
+        a[a < 0] = np.nan
+        return a
 
 
 @dataclass

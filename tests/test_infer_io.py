@@ -23,19 +23,19 @@ def test_synthetic_jrc_source_matches_the_gee_interface():
     assert jrc.matched_month(src, g, "2019-05-20").offset_months == 0
 
 
-def test_write_result_makes_geotiffs(tmp_path):
+def test_write_result_makes_geotiffs_named_by_date_and_orbit(tmp_path):
     rasterio = pytest.importorskip("rasterio")
     from affine import Affine
-    from ai_water import infer, otsu
+    from ai_water import infer
     h = w = 32
-    res = infer.SceneResult(np.zeros((h, w), np.float32), np.zeros((h, w), np.float32),
-                            np.full((h, w), otsu.CLASS_LAND, np.uint8), np.zeros((h, w), bool),
-                            np.full((h, w), 0.2, np.float32), np.zeros((h, w), bool), np.zeros((h, w), np.uint8), None)
+    z = np.zeros((h, w), np.float32)
+    res = infer.SceneResult(z, z, z, np.full((h, w), 0.2, np.float32), np.zeros((h, w), bool), np.zeros((h, w), np.uint8),
+                            "ascending")
 
     class GB:
         transform = Affine(10, 0, 300000, 0, -10, 1650000)
         crs = "EPSG:32651"
     paths = infer.write_result(str(tmp_path), "2024-05-01", res, GB)
-    assert set(paths) == {"otsu_classes", "fused_water", "flags", "prob"}
+    assert set(paths) == {"water", "flags", "prob"} and paths["water"].endswith("2024-05-01_ascending_water.tif")
     with rasterio.open(paths["prob"]) as r:
         assert r.shape == (h, w) and r.crs.to_string() == "EPSG:32651" and r.transform.a == 10

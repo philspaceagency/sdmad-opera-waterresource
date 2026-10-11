@@ -67,3 +67,51 @@ class SyntheticJrc:
 
     def occurrence(self, grid):
         return np.zeros((grid.ny, grid.nx), np.float32)
+
+
+def make_terrain_scene(shape=(384, 384), seed=0, res_m=10.0, orbit="descending", looks=4, slope_deg=30.0):
+    """A reservoir in a valley with a hill on each side, seen from `orbit`. Returns dict(vv, vh linear, truth bool water, dem (m)).
+
+    The flank that faces away from the sensor is in radar shadow: as dark as water (-22 dB), which is the false-water trap.
+    The flank that faces the sensor is bright (foreshortening). Descending passes look west (the EAST flank is in shadow),
+    ascending passes look east (the WEST flank is)."""
+    rng = np.random.default_rng(seed)
+    h, w = shape
+    xc = w // 2
+    half = 30 + ndi.gaussian_filter(rng.standard_normal(h), 12.0) * 40          # lake half-width per row, wobbly shore
+    half = np.clip(half, 20, 60)
+    cols = np.arange(w)[None, :]
+    dist = np.abs(cols - xc) - half[:, None]                                    # < 0 inside the lake
+    truth = dist < 0
+    dem = 100.0 + np.clip(dist, 0, None) * res_m * np.tan(np.radians(slope_deg))
+    dem = ndi.gaussian_filter(dem, 1.0).astype(np.float32)
+    east = (cols > xc) & ~truth
+    shadow_side = east if orbit == "descending" else (~east & ~truth & (cols < xc))
+    steep = np.clip(dist, 0, None) > 3
+    land_tex = ndi.gaussian_filter(rng.standard_normal(shape), 4.0)
+    land_tex = 1.2 * (land_tex - land_tex.mean()) / land_tex.std()
+    vv_db = np.where(truth, -20.0, -8.0 + land_tex)
+    vv_db = np.where(shadow_side & steep, -22.0 + 0.5 * land_tex, vv_db)
+    vv_db = np.where(~shadow_side & ~truth & steep, -5.0 + 0.5 * land_tex, vv_db)
+    vv = 10.0 ** (vv_db / 10.0)
+    vh = 10.0 ** ((vv_db - 7.0) / 10.0)
+
+    def speckle(x):
+        return (x * rng.gamma(looks, 1.0 / looks, size=x.shape)).astype(np.float32)
+    return {"vv": speckle(vv), "vh": speckle(vh), "truth": truth, "dem": dem, "shadow": shadow_side & steep}
+
+
+class SyntheticTerrain:
+    """Offline stand-in for terrain.GeeTerrain: serves a fixed DEM (and optional WorldCover raster) for any grid of that shape."""
+
+    def __init__(self, dem, worldcover=None):
+        self._dem = dem
+        self._wc = worldcover if worldcover is not None else np.full(dem.shape, 10, np.uint8)
+        self.calls = 0
+
+    def dem(self, grid):
+        self.calls += 1
+        return self._dem.copy()
+
+    def landcover(self, grid):
+        return self._wc.copy()
