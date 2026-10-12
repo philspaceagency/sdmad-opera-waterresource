@@ -17,7 +17,7 @@ import numpy as np
 from . import features
 from .jrc import GeePixels
 
-DEM_ASSET = "COPERNICUS/DEM/GLO30"
+DEM_ASSET = "COPERNICUS/DEM/GLO30_2024_1"
 DEM_BANDS = ("DEM", "elevation")                 # first one the asset has wins; a miss lists the real bands
 LANDCOVER_ASSET = "ESA/WorldCover/v200"
 LANDCOVER_BANDS = ("Map",)
