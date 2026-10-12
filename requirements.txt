@@ -17,3 +17,6 @@ affine
 # JRC labels (Google Earth Engine; run `earthengine authenticate` once)
 earthengine-api
 # optional: TerraMind stage (see requirements-fm.txt)
+# SWOT water level + volume (swot_volume/): NASA Earthdata login needed for the download
+# earthaccess
+# geopandas

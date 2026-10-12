@@ -166,6 +166,24 @@ training patches at all. One site (La Mesa Dam by default, `HOLDOUT`) is held ou
 has never seen. Add water bodies by adding rows; **rows on steep terrain are what teach the model about shadow**. The rivers are the hardest case: a river a few pixels wide is mostly
 mixed pixels at 10 m.
 
+## Water level and storage volume (SWOT + Sentinel-1)
+
+`swot_volume/` combines the Sentinel-1 water area (`areas.csv`) with the **SWOT** `SWOT_L2_HR_LakeSP` lake product (PO.DAAC) to give water level, area and volume of a reservoir.
+
+1. **Level**: `swot.py` finds and downloads the `Obs` lake shapefiles over the site (`earthaccess`, free Earthdata login), keeps the lakes that intersect the reservoir, drops fill values,
+   partial-swath lakes and poor `quality_f` / `xovr_cal_q`, and combines split polygons. Output: `wse` (m above EGM2008) and its uncertainty per pass.
+2. **Area**: `integrate.s1_daily_area` takes one Sentinel-1 water area per date (scenes that observed only part of the site are dropped).
+3. **Curve**: each SWOT level is paired with the nearest Sentinel-1 date (<= 6 days); the pairs trace the **area-elevation curve** A(h) (isotonic fit, or a power law).
+4. **Volume**: V(h) = integral of A dh. Without a reference the volume is **relative to the lowest observed level** (labelled so in the table). Give `--h-ref` / `--v-ref`
+   (storage at a known level, e.g. from the dam operator) for absolute storage. The curve only covers the range of levels SWOT observed; outside it, area is extrapolated linearly.
+
+```bash
+python scripts/swot_volume.py --areas outputs/maps/areas.csv --start 2023-08-01 --end 2025-06-30 [--swot-dir cache/swot] [--h-ref 180 --v-ref 120]
+```
+
+Writes `outputs/swot_volume/level_area_volume.csv`. Note: this was written without network access to PO.DAAC, from the documented product fields; `swot.NAMES` is the single place to change
+if a release names a field differently, and the first real run should be checked against a few granules. `python -m pytest tests/test_swot_volume.py` runs offline.
+
 ## Design notes
 
 **Acquisition** follows `Leads-DigiSaka-System/ai-irrigation` (`stac_data.py`, `sar.py`): `sentinel-1-rtc` via `pystac-client`, `odc-stac` onto an explicit geobox, URLs signed at read
