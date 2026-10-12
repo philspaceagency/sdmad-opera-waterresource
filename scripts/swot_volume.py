@@ -12,14 +12,20 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."
 
 import glob  # noqa: E402
 
-from ai_water import sites  # noqa: E402
+try:                                              # inside sdmad-opera-waterresource; standalone (wateraltimeter) it falls back to Angat
+    from ai_water import sites  # noqa: E402
+except ImportError:
+    sites = None
 from swot_volume import integrate, swot  # noqa: E402
+
+ANGAT_NAME = "angat_dam"
+ANGAT_BBOX = (121.14302981543655, 14.872088697247067, 121.26233447214564, 15.053187085370627)   # west, south, east, north
 
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--areas", required=True, help="areas.csv written by map_water.py")
-    ap.add_argument("--site", default=sites.default_site().name)
+    ap.add_argument("--site", default=ANGAT_NAME)
     ap.add_argument("--aoi", help="vector file with the reservoir outline, to pick SWOT lakes (default: the site box)")
     ap.add_argument("--start", default="2023-08-01")
     ap.add_argument("--end", default="2025-12-31")
@@ -33,10 +39,13 @@ def main():
     ap.add_argument("--out", default="outputs/swot_volume")
     a = ap.parse_args()
 
-    site = sites.get(a.site)
-    bbox = site.bbox
+    site = sites.get(a.site) if sites else None
+    bbox = site.bbox if site else ANGAT_BBOX
+    site_name = site.name if site else a.site
     outline = None
     if a.aoi:
+        if sites is None:
+            sys.exit("--aoi needs the ai_water package (sdmad-opera-waterresource)")
         outline = sites.sites_from_vector(a.aoi)[0].geometry
     paths = sorted(glob.glob(os.path.join(a.swot_dir, "**", "*_Obs_*.shp"), recursive=True))
     if not paths:
@@ -47,7 +56,7 @@ def main():
     obs = obs[(obs["date"] >= a.start) & (obs["date"] <= a.end)]
     if obs.empty:
         sys.exit("no usable SWOT observations of the reservoir in that window")
-    table, curve = integrate.compute(obs, integrate.s1_daily_area(a.areas, site=site.name), a.max_lag_days, a.method, a.h_ref, a.v_ref)
+    table, curve = integrate.compute(obs, integrate.s1_daily_area(a.areas, site=site_name), a.max_lag_days, a.method, a.h_ref, a.v_ref)
     os.makedirs(a.out, exist_ok=True)
     table.to_csv(os.path.join(a.out, "level_area_volume.csv"), index=False)
     print(table.to_string(index=False))
