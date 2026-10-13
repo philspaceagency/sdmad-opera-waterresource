@@ -74,3 +74,11 @@ def test_s1_daily_area_drops_partial_scenes():
                        "water_km2": [20.0, 22.0, 5.0], "valid_km2": [100.0, 100.0, 40.0]})
     out = integrate.s1_daily_area(df, site="angat_dam")
     assert len(out) == 1 and out["s1_area_km2"][0] == 21.0
+
+
+def test_granule_name_parsing_and_filter():
+    n = "SWOT_L2_HR_LakeSP_Obs_010_013_AS_20240101T000000_20240101T001000_PIC0_01.zip"
+    assert swot.parse_granule_name(n) == {"kind": "Obs", "cycle": 10, "pass": 13, "continent": "AS"}
+    assert swot.parse_granule_name("something_else.zip") is None
+    assert swot.wanted(n) and not swot.wanted(n, kind="Prior") and not swot.wanted(n.replace("_AS_", "_NA_"))
+    assert swot.wanted(n.replace("_AS_", "_NA_"), continent=None) and swot.wanted(n, passes=[13]) and not swot.wanted(n, passes=[14])

@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import glob
 import os
+import re
 import zipfile
 
 import numpy as np
@@ -32,6 +33,25 @@ NAMES = {"wse": "wse", "wse_u": "wse_u", "area": "area_total", "area_detct": "ar
 OUT_COLUMNS = ["date", "time_utc", "lake_id", "wse_m", "wse_u_m", "swot_area_km2", "partial", "quality", "xovr_q", "dark_frac"]
 
 
+CONTINENTS = {"AF": "Africa", "EU": "Europe and Middle East", "SI": "Siberia", "AS": "Central and Southeast Asia", "AU": "Australia and Oceania",
+              "SA": "South America", "NA": "North America and Caribbean", "AR": "North American Arctic", "GR": "Greenland"}
+PHILIPPINES_CONTINENT = "AS"
+# LakeSP / RiverSP granules are continent-level swaths named ..._<Obs|Prior|Unassigned>_<cycle>_<PPP pass 001-584>_<CC continent>_<start>_<end>_...
+_GRANULE = re.compile(r"_(Obs|Prior|Unassigned)_(\d{3})_(\d{3})_([A-Z]{2})(?:_|\.)")
+
+
+def parse_granule_name(name):
+    """'SWOT_L2_HR_LakeSP_Obs_010_013_AS_2024...zip' -> {'kind': 'Obs', 'cycle': 10, 'pass': 13, 'continent': 'AS'}, or None if it does not match."""
+    m = _GRANULE.search(os.path.basename(str(name)))
+    return None if not m else {"kind": m.group(1), "cycle": int(m.group(2)), "pass": int(m.group(3)), "continent": m.group(4)}
+
+
+def wanted(name, kind="Obs", continent=PHILIPPINES_CONTINENT, passes=None):
+    """True if a granule file name is of `kind`, on `continent` (None = any) and, when given, one of the pass numbers `passes`."""
+    g = parse_granule_name(name)
+    return bool(g) and g["kind"] == kind and (continent is None or g["continent"] == continent) and (not passes or g["pass"] in set(passes))
+
+
 def search(bbox, start, end, short_name=SHORT_NAME):
     """Granule results over bbox=(west, south, east, north) and [start, end] (ISO dates). Needs earthaccess."""
     import earthaccess
@@ -39,11 +59,12 @@ def search(bbox, start, end, short_name=SHORT_NAME):
     return earthaccess.search_data(short_name=short_name, bounding_box=tuple(bbox), temporal=(start, end))
 
 
-def download(results, out_dir, kind="Obs"):
-    """Download the granules (only the `kind` shapefile zips: 'Obs', 'Prior' or 'Unassigned') and unzip them. Returns the .shp paths."""
+def download(results, out_dir, kind="Obs", continent=PHILIPPINES_CONTINENT, passes=None):
+    """Download the granules (only the `kind` shapefile zips: 'Obs', 'Prior' or 'Unassigned', on `continent` 'AS' = Central and Southeast
+    Asia, which holds the Philippines; None = any; optionally only the pass numbers in `passes`) and unzip them. Returns the .shp paths."""
     import earthaccess
     os.makedirs(out_dir, exist_ok=True)
-    links = [l for r in results for l in r.data_links() if f"_{kind}_" in os.path.basename(l)]
+    links = [l for r in results for l in r.data_links() if wanted(l, kind, continent, passes)]
     files = earthaccess.download(links, out_dir) if links else []
     shps = []
     for f in files:
