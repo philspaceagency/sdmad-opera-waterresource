@@ -100,7 +100,7 @@ def read_shapefiles(paths, reservoir=None, bbox=None):
     return g
 
 
-def observations_from_frames(frames, max_quality=1, max_xovr=1, allow_partial=False, min_area_km2=None):
+def observations_from_frames(frames, max_quality=1, max_xovr=1, allow_partial=False, min_area_km2=None, lake_ids=None):
     """One row per SWOT lake observation of the reservoir, filtered on quality.
 
     `frames`: a DataFrame / GeoDataFrame (or list of them) with the product fields. When several polygons of one pass belong to the
@@ -111,6 +111,9 @@ def observations_from_frames(frames, max_quality=1, max_xovr=1, allow_partial=Fa
     df = pd.concat(frames, ignore_index=True) if isinstance(frames, (list, tuple)) else frames.copy()
     if df.empty:
         return pd.DataFrame(columns=OUT_COLUMNS)
+    if lake_ids:     # keep polygons whose lake_id (may hold several ids, separated by ; or ,) mentions one of these
+        ids = {str(i) for i in lake_ids}
+        df = df[df[n["lake_id"]].astype(str).map(lambda v: bool(ids & set(re.split(r"[;,\\s]+", v))))]
     t = pd.to_datetime(df[n["time"]], errors="coerce", utc=True)
     df = df.assign(_t=t)
     df = df[np.isfinite(pd.to_numeric(df[n["wse"]], errors="coerce")) & df["_t"].notna()]          # fill values are -1e12 etc.
@@ -134,6 +137,41 @@ def observations_from_frames(frames, max_quality=1, max_xovr=1, allow_partial=Fa
                      "xovr_q": int(pd.to_numeric(g[n["xovr_q"]], errors="coerce").max()) if n["xovr_q"] in g else 0,
                      "dark_frac": float(pd.to_numeric(g[n["dark"]], errors="coerce").mean()) if n["dark"] in g else np.nan})
     out = pd.DataFrame(rows, columns=OUT_COLUMNS).sort_values("time_utc").reset_index(drop=True)
-    if min_area_km2:
+    if min_area_km2 and len(out):
         out = out[out["swot_area_km2"] >= min_area_km2].reset_index(drop=True)
     return out
+
+
+def lake_summary(frames, top=10):
+    """The lakes in the frames ranked by their largest observed area: find the reservoir's lake_id (Angat is the big one, km2 not m2) and
+    see what else the box picked up. Columns: lake_id, n_obs, max_area_km2, median_wse_m."""
+    n = NAMES
+    df = frames if isinstance(frames, pd.DataFrame) else pd.concat(frames, ignore_index=True)
+    if df.empty:
+        return pd.DataFrame(columns=["lake_id", "n_obs", "max_area_km2", "median_wse_m"])
+    d = pd.DataFrame({"lake_id": df[n["lake_id"]].astype(str), "a": pd.to_numeric(df[n["area"]], errors="coerce") / 1e6,
+                      "h": pd.to_numeric(df[n["wse"]], errors="coerce").where(lambda x: x > -1e6)})
+    out = d.groupby("lake_id").agg(n_obs=("a", "size"), max_area_km2=("a", "max"), median_wse_m=("h", "median"))
+    return out.sort_values("max_area_km2", ascending=False).head(top).reset_index()
+
+
+def funnel(frames, max_quality=1, max_xovr=1, allow_partial=False):
+    """How many polygons survive each filter of `observations_from_frames`, so you can see why few passes are left."""
+    n = NAMES
+    df = frames if isinstance(frames, pd.DataFrame) else pd.concat(frames, ignore_index=True)
+    steps = [("all polygons", pd.Series(True, index=df.index))]
+    t = pd.to_datetime(df[n["time"]], errors="coerce", utc=True)
+    w = pd.to_numeric(df[n["wse"]], errors="coerce")
+    steps.append(("valid time and wse (not fill value)", t.notna() & w.notna() & (w > -1e6)))
+    if n["quality"] in df:
+        steps.append((f"quality_f <= {max_quality}", pd.to_numeric(df[n["quality"]], errors="coerce") <= max_quality))
+    if n["xovr_q"] in df:
+        steps.append((f"xovr_cal_q <= {max_xovr}", pd.to_numeric(df[n["xovr_q"]], errors="coerce").fillna(0) <= max_xovr))
+    if n["partial"] in df and not allow_partial:
+        steps.append(("not partial_f", pd.to_numeric(df[n["partial"]], errors="coerce").fillna(0) == 0))
+    keep = pd.Series(True, index=df.index)
+    rows = []
+    for name, m in steps:
+        keep &= m
+        rows.append({"filter": name, "polygons": int(keep.sum()), "passes": int(t[keep].dt.floor("min").nunique())})
+    return pd.DataFrame(rows)

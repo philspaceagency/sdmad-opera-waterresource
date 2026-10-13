@@ -82,3 +82,15 @@ def test_granule_name_parsing_and_filter():
     assert swot.parse_granule_name("something_else.zip") is None
     assert swot.wanted(n) and not swot.wanted(n, kind="Prior") and not swot.wanted(n.replace("_AS_", "_NA_"))
     assert swot.wanted(n.replace("_AS_", "_NA_"), continent=None) and swot.wanted(n, passes=[13]) and not swot.wanted(n, passes=[14])
+
+
+def test_funnel_lake_summary_and_lake_ids():
+    f = frames()
+    f2 = frames(3, bad=False); f2["lake_id"] = "5240013113;5240013413"; f2["area_total"] = 5.0; f2["wse"] = 90.0
+    allf = pd.concat([f, f2], ignore_index=True)
+    fu = swot.funnel(allf)
+    assert fu["polygons"].is_monotonic_decreasing and fu["polygons"].iloc[0] == 15
+    ls = swot.lake_summary(allf)
+    assert ls["lake_id"].iloc[0] == "4000000001" and ls["max_area_km2"].iloc[0] > 50
+    assert set(swot.observations_from_frames(allf, lake_ids=["5240013413"])["wse_m"]) == {90.0}
+    assert len(swot.observations_from_frames(allf, min_area_km2=1.0)) == 9      # ponds dropped

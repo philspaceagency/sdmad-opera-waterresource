@@ -28,10 +28,12 @@ def main():
     ap.add_argument("--site", default=ANGAT_NAME)
     ap.add_argument("--aoi", help="vector file with the reservoir outline, to pick SWOT lakes (default: the site box)")
     ap.add_argument("--start", default="2023-08-01")
-    ap.add_argument("--end", default="2025-12-31")
+    ap.add_argument("--end", default=__import__("datetime").date.today().isoformat())
     ap.add_argument("--swot-dir", default="cache/swot", help="where SWOT shapefiles are downloaded / already are")
     ap.add_argument("--max-lag-days", type=int, default=6)
     ap.add_argument("--max-quality", type=int, default=1, help="keep quality_f <= this (0 good, 1 suspect)")
+    ap.add_argument("--lake-ids", nargs="*", help="keep only these SWOT lake_id values (see the lake summary)")
+    ap.add_argument("--min-area-km2", type=float, default=1.0)
     ap.add_argument("--allow-partial", action="store_true")
     ap.add_argument("--method", default="isotonic", choices=["isotonic", "power"])
     ap.add_argument("--h-ref", type=float, help="level (m, EGM2008) at which --v-ref holds")
@@ -47,12 +49,16 @@ def main():
         if sites is None:
             sys.exit("--aoi needs the ai_water package (sdmad-opera-waterresource)")
         outline = sites.sites_from_vector(a.aoi)[0].geometry
-    paths = sorted(glob.glob(os.path.join(a.swot_dir, "**", "*_Obs_*.shp"), recursive=True))
-    if not paths:
-        print("searching SWOT L2_HR_LakeSP ...")
-        paths = swot.download(swot.search(bbox, a.start, a.end), a.swot_dir, kind="Obs")
+    print("searching SWOT L2_HR_LakeSP ...")
+    try:
+        paths = swot.download(swot.search(bbox, a.start, a.end), a.swot_dir, kind="Obs")      # files already in swot-dir are not fetched again
+    except Exception as e:                                                                       # offline / no login: use what is on disk
+        print("search failed (", e, ") - using shapefiles already in", a.swot_dir)
+        paths = sorted(glob.glob(os.path.join(a.swot_dir, "**", "*_Obs_*.shp"), recursive=True))
     g = swot.read_shapefiles(paths, reservoir=outline, bbox=bbox)
-    obs = swot.observations_from_frames(g, max_quality=a.max_quality, allow_partial=a.allow_partial)
+    print(swot.funnel(g, a.max_quality, 1, a.allow_partial).to_string(index=False))
+    print(swot.lake_summary(g).to_string(index=False))
+    obs = swot.observations_from_frames(g, max_quality=a.max_quality, allow_partial=a.allow_partial, lake_ids=a.lake_ids, min_area_km2=a.min_area_km2)
     obs = obs[(obs["date"] >= a.start) & (obs["date"] <= a.end)]
     if obs.empty:
         sys.exit("no usable SWOT observations of the reservoir in that window")
