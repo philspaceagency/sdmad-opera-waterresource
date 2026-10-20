@@ -1,4 +1,4 @@
-"""Map surface water with a trained model: one body (default Angat Dam), many bodies, or the whole country.
+"""Map surface water with a trained model: one body (default Angat Dam) or a list of bodies.
 
     # Angat Dam (the default area)
     python scripts/map_water.py --model models/terramind_water_decoder.pt --start 2024-01-01 --end 2024-03-31
@@ -10,12 +10,8 @@
     python scripts/map_water.py --model ... --aoi dams.geojson --multiple --start ... --end ...
     python scripts/map_water.py --model ... --aoi dams.geojson --names "Ambuklao Dam" "Binga Dam" ...
 
-    # nationwide: ~20 km tiles over a country outline (omit --boundary to use Earth Engine's), optionally only the tiles with water
-    python scripts/map_water.py --model ... --nationwide --boundary philippines.geojson --prescreen --gee-project my-project \
-        --start 2024-01-01 --end 2024-03-31 --bbox 120.5 14.0 121.5 15.0       # --bbox / --limit-tiles: try a region first
-
-Output goes to --out (default outputs/maps): per site <site>/frequency.tif, n_obs.tif and per-date masks, plus areas.csv, failures.csv
-and (nationwide) index.geojson. Re-running resumes; --restart reprocesses.
+Output goes to --out (default outputs/maps): per site <site>/frequency.tif, n_obs.tif and per-date masks, plus areas.csv, failures.csv.
+The whole country is a separate job: scripts/map_nationwide.py. Re-running resumes; --restart reprocesses.
 Earth Engine is needed for the terrain (DEM, land cover): authenticate once with `earthengine authenticate` and pass --gee-project.
 Both Sentinel-1 pass directions are used when the archive has them; frequency.tif is the minimum over the two directions.
 """
@@ -25,7 +21,7 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from ai_water import batch, infer, jrc, nationwide, scene, sites  # noqa: E402
+from ai_water import batch, infer, jrc, scene, sites  # noqa: E402
 
 
 def main():
@@ -42,19 +38,10 @@ def main():
     g.add_argument("--name-col", default=None, help="property that holds the feature's name")
     g.add_argument("--buffer-km", type=float, default=1.0, help="margin around each outline (default 1 km)")
     g.add_argument("--kind", default=None, help="reservoir | lake | river ... (default: guessed from the geometry)")
-    n = ap.add_argument_group("nationwide")
-    n.add_argument("--nationwide", action="store_true")
-    n.add_argument("--boundary", default=None, help="polygon file of the country / provinces (default: Earth Engine's LSIB)")
-    n.add_argument("--country", default="Philippines")
-    n.add_argument("--tile-deg", type=float, default=nationwide.TILE_DEG)
-    n.add_argument("--bbox", nargs=4, type=float, metavar=("W", "S", "E", "N"), default=None, help="restrict to a lon/lat box")
-    n.add_argument("--limit-tiles", type=int, default=None)
-    n.add_argument("--prescreen", action="store_true", help="skip tiles without surface water (JRC, needs Earth Engine)")
-    n.add_argument("--min-water-frac", type=float, default=0.001)
     ap.add_argument("--gee-project", default=None)
     o = ap.add_argument_group("outputs")
     o.add_argument("--write", nargs="*", default=None, choices=list(infer.ALL_OUTPUTS),
-                   help="per-scene GeoTIFFs (default: water flags; nationwide: none)")
+                   help="per-scene GeoTIFFs (default: water flags)")
     o.add_argument("--threshold", type=float, default=0.5, help="water probability threshold (default 0.5)")
     o.add_argument("--max-slope", type=float, default=infer.MAX_SLOPE_DEG,
                    help="terrain safeguard: water on slopes steeper than this (deg) is removed and flagged; 0 = off")
@@ -71,29 +58,19 @@ def main():
     except Exception as e:                                          # noqa: BLE001
         sys.exit(f"error: Earth Engine could not be initialised ({e.__class__.__name__}: {e}). It supplies the DEM and land cover: "
                  "run `earthengine authenticate` once and pass --gee-project <your project>.")
-    write = tuple(a.write) if a.write is not None else (() if a.nationwide else ("water", "flags"))
+    write = tuple(a.write) if a.write is not None else ("water", "flags")
     cfg = batch.MapConfig(start=a.start, end=a.end, out_dir=a.out, write=write, composite=not a.no_composite, resume=not a.restart,
                           stop_on_error=a.stop_on_error, cache_dir=a.cache, device=None, threshold=a.threshold,
                           max_slope_deg=a.max_slope or None, use_landcover=not a.no_landcover, scene=scene.SceneConfig())
 
-    if a.nationwide:
-        source = jrc.GeeJrc() if a.prescreen else None
-        try:
-            boundary = nationwide.national_boundary(a.boundary, a.country)
-        except (ValueError, RuntimeError, FileNotFoundError) as e:
-            sys.exit(f"error: {e}")
-        res, tiles, idx = nationwide.run_nationwide(model, boundary, cfg, tile_deg=a.tile_deg, jrc_source=source,
-                                                    min_water_frac=a.min_water_frac, bbox=a.bbox, limit_tiles=a.limit_tiles)
-        print(nationwide.monthly_national_area(res.areas).to_string(index=False))
-    else:
-        kw = {k: v for k, v in dict(name_col=a.name_col, kind=a.kind).items() if v}
-        try:
-            chosen = sites.resolve_aoi(a.aoi, a.names, a.multiple,
-                                       **({"buffer_km": a.buffer_km, **kw} if a.aoi and not a.aoi.lower().endswith(".csv") else {}))
-        except (ValueError, KeyError, FileNotFoundError, ImportError) as e:
-            sys.exit(f"error: {e.args[0] if e.args else e}")
-        print("mapping:", ", ".join(f"{s.label} ({s.kind})" for s in chosen))
-        res = batch.map_sites(chosen, model, cfg)
+    kw = {k: v for k, v in dict(name_col=a.name_col, kind=a.kind).items() if v}
+    try:
+        chosen = sites.resolve_aoi(a.aoi, a.names, a.multiple,
+                                   **({"buffer_km": a.buffer_km, **kw} if a.aoi and not a.aoi.lower().endswith(".csv") else {}))
+    except (ValueError, KeyError, FileNotFoundError, ImportError) as e:
+        sys.exit(f"error: {e.args[0] if e.args else e}")
+    print("mapping:", ", ".join(f"{s.label} ({s.kind})" for s in chosen))
+    res = batch.map_sites(chosen, model, cfg)
     print(res.areas.groupby("site")[["water_km2"]].agg(["count", "mean", "max"]).round(3).to_string() if len(res.areas) else "no scenes mapped")
     if res.failures:
         print(f"{len(res.failures)} failure(s): see {os.path.join(a.out, 'failures.csv')}")

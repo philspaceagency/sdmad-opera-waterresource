@@ -20,7 +20,8 @@ Planetary Computer sentinel-1-rtc (VV, VH, linear gamma0, 10 m)        acquire.p
    -> TerraMind S1RTC encoder + decoder over 14 channels -> models/    terramind_seg.py
 
  MAPPING   (notebooks/ai_water_inference.ipynb, scripts/map_water.py)
-   area: Angat Dam (default) | a dam's vector file | many bodies | ~20 km tiles over a country   sites.py, nationwide.py
+   area: Angat Dam (default) | a dam's vector file | a list of bodies   sites.py
+   (separate job) whole country: scripts/map_nationwide.py -> ~20 km tiles   nationwide.py
    -> P(water) per pass -> water mask (+ terrain safeguard flag), per body, date and orbit        infer.py
    -> areas.csv, water-frequency map = min(ascending, descending), per-date masks, failures.csv   batch.py
 ```
@@ -66,7 +67,7 @@ Two notebooks, run in this order (both work on **real data**; use a GPU runtime)
 | Notebook | What it does |
 |---|---|
 | `notebooks/ai_water_training.ipynb` | builds the JRC-labelled dataset for the six training sites (`data/training_sites.csv`), trains TerraMind with a site held out, saves the model (`models/terramind_water_decoder.pt` + model card) |
-| `notebooks/ai_water_inference.ipynb` | maps surface water with that model. `RUN_MODE = "single"` (default **Angat Dam**, or the vector file of another dam), `"multiple"` (several bodies in one run), `"nationwide"` (the whole country in tiles) |
+| `notebooks/ai_water_inference.ipynb` | maps surface water with that model. `RUN_MODE = "single"` (default **Angat Dam**, or the vector file of another dam), `"multiple"` (a list of bodies in one run). The whole country is a separate job: `scripts/map_nationwide.py` |
 
 Set `GEE_PROJECT` in the config cell: Earth Engine is always needed (JRC labels in training, DEM and land cover everywhere). Both notebooks are **resumable**: a dataset build or a mapping
 run that is interrupted (a Colab disconnect) continues where it stopped, without reading the finished Sentinel-1 passes again.
@@ -83,13 +84,18 @@ lives elsewhere.
 | **Angat Dam** (the default) | nothing: `AOI = None` |
 | another **dam, reservoir, lake or river** | `AOI = "my_dam.geojson"` / `--aoi my_dam.geojson`: a vector file with the outline. GeoJSON works as is; GeoPackage, Shapefile and KML need `geopandas`. The file must be lon/lat (GeoJSON) or carry its CRS |
 | **several bodies** in one run | a file with one feature per body (or a sites CSV) and `RUN_MODE = "multiple"` / `--multiple`; `AOI_NAMES` / `--names` picks some of them. A multi-feature file is never silently cut down to its first feature |
-| the **whole country** | `RUN_MODE = "nationwide"` / `--nationwide`, with `BOUNDARY` / `--boundary` = a country or province outline (or leave it out to use Earth Engine's country boundary). Start with `NATIONWIDE_BBOX` / `--bbox` or `--limit-tiles` |
+| the **whole country** | not here: `python scripts/map_nationwide.py` (below) |
 
 Each feature becomes a site: the box of its outline plus `BUFFER_KM` (1 km, so shorelines keep their edge pixels), its own UTM zone, and the outline itself, which results are
 clipped to. A feature's name comes from `NAME_COL` (else `name`, `dam`, `label`, `id`); its kind (reservoir / lake / river) is guessed from the geometry unless set. Points get a
 box of a radius by kind. Sites can also be listed in a CSV (`name`, `kind`, and `corners` as `((lat, lon), (lat, lon))`, or `south,west,north,east`, or `lat,lon,radius_km`).
 
-**Nationwide** (`nationwide.py`) cuts the boundary into ~0.18 degree (~20 km) tiles on a fixed grid (a tile always has the same name and box, which makes runs resumable), each
+### Nationwide mapping (a separate script)
+
+Individual and listed bodies are mapped in the notebook (or `scripts/map_water.py`). The whole country is a long batch job and has its own script, `scripts/map_nationwide.py`
+(outputs go to `outputs/nationwide` by default). `--boundary` is a country or province outline (leave it out to use Earth Engine's country boundary); start with `--bbox` or `--limit-tiles`.
+
+`nationwide.py` cuts the boundary into ~0.18 degree (~20 km) tiles on a fixed grid (a tile always has the same name and box, which makes runs resumable), each
 clipped to the land plus a 1 km margin so the open sea is not mapped. `PRESCREEN` drops tiles with almost no surface water using JRC occurrence. Tiles go through the same code as
 a single site, so one failing tile does not stop the others. There is **no single national raster** (at 10 m it would be about 3 x 10^9 pixels per layer): the tiles are the
 product, with `index.geojson` listing every tile and its statistics; `gdalbuildvrt` makes a virtual mosaic per UTM zone if you need one. `monthly_national_area` sums the tiles'
@@ -105,7 +111,7 @@ Under `outputs/maps` (the `OUT` setting):
 | `<site>/frequency.tif` | % of the valid observations on which each pixel was water (255 = never observed). With both directions: the **minimum** of the two directions' frequencies |
 | `<site>/frequency_ascending.tif`, `frequency_descending.tif` | the per-direction frequencies, when both directions were observed |
 | `<site>/n_obs.tif` | number of valid observations per pixel (both directions) |
-| `<site>/<date>_<orbit>_water.tif`, `_flags.tif`, `_prob.tif` | per-date masks (`WRITE`; none by default for nationwide). `flags`: 0 land, 1 water, 2 the model said water but the slope is steeper than `MAX_SLOPE_DEG` (25 deg): removed, listed for review |
+| `<site>/<date>_<orbit>_water.tif`, `_flags.tif`, `_prob.tif` | per-date masks (`WRITE`; `map_nationwide.py` writes none unless `--write` is given). `flags`: 0 land, 1 water, 2 the model said water but the slope is steeper than `MAX_SLOPE_DEG` (25 deg): removed, listed for review |
 | `failures.csv` | sites that failed (no pass covers them, a read error) with the reason |
 | `index.geojson` | nationwide only: every tile with status, scenes, mean / max area |
 
@@ -122,7 +128,9 @@ python scripts/train_terramind.py --dataset outputs/dataset --holdout-sites "La 
 python scripts/map_water.py --gee-project <project> --start 2024-01-01 --end 2024-03-31          # Angat Dam
 python scripts/map_water.py --aoi my_dam.geojson --start ... --end ...                            # another dam
 python scripts/map_water.py --aoi dams.geojson --multiple --start ... --end ...                   # many bodies
-python scripts/map_water.py --nationwide --boundary philippines.geojson --prescreen --gee-project <project> \
+
+# the whole country (separate script)
+python scripts/map_nationwide.py --boundary philippines.geojson --prescreen --gee-project <project> \
         --bbox 120.5 14.0 121.5 15.0 --start ... --end ...                                        # a region first, then the country
 ```
 
@@ -144,7 +152,7 @@ python scripts/map_water.py --nationwide --boundary philippines.geojson --prescr
 | `ai_water/synthetic.py` | synthetic scenes (including a valley with radar shadow) and stand-ins for the tests |
 | `data/training_sites.csv` | the six training water bodies |
 | `models/` | the small trained model and its model card (see below) |
-| `scripts/` | `build_dataset.py`, `train_terramind.py`, `map_water.py` |
+| `scripts/` | `build_dataset.py`, `train_terramind.py`, `map_water.py` (individual / listed bodies), `map_nationwide.py` |
 | `notebooks/` | `ai_water_training.ipynb`, `ai_water_inference.ipynb` |
 | `tests/` | offline tests (synthetic data; Earth Engine and Planetary Computer replaced by stand-ins) |
 

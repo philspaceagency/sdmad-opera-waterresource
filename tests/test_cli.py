@@ -90,23 +90,14 @@ def test_many_bodies_need_the_multiple_flag_and_names_can_pick(tmp_path, monkeyp
     assert {s for s, _ in fake.reads} == {"b_dam"}
 
 
-def test_nationwide_from_a_boundary_file_with_a_region_and_a_cap(tmp_path, monkeypatch, capsys):
-    w, s, e, n = lonlat_box(X0, Y1 - N * RES, X0 + N * RES, Y1)
-    cx, cy = 0.5 * (w + e), 0.5 * (s + n)
-    boundary = geojson(tmp_path, [({"name": "Isla"}, sbox(cx - 0.6, cy - 0.6, cx + 0.6, cy + 0.6))], "isla.geojson")
-    AnySite().install(monkeypatch)
-    out = tmp_path / "nat"
-    run_cli(monkeypatch, "--nationwide", "--boundary", boundary, "--bbox", str(cx - 0.1), str(cy - 0.1), str(cx + 0.1), str(cy + 0.1),
-            "--limit-tiles", "2", "--start", "2024-01-01", "--end", "2024-03-01", "--out", str(out))
-    idx = json.load(open(out / "index.geojson"))["features"]
-    assert len(idx) == 2 and all(f["properties"]["status"] == "ok" for f in idx)
-    assert not list(out.glob("tile_*/*_water.tif"))                     # nationwide writes no per-date masks by default
-    assert "n_tiles" in capsys.readouterr().out
-
-
 def test_a_missing_model_is_explained(tmp_path, monkeypatch):
     pytest.importorskip("torch")
     with pytest.raises(FileNotFoundError, match="train a model first"):
         monkeypatch.undo()
         monkeypatch.setattr(jrc, "init_gee", lambda project=None, **kw: None)
         run_cli_real(monkeypatch, "--model", str(tmp_path / "none.pt"), "--start", "2024-01-01", "--end", "2024-03-01", "--out", str(tmp_path))
+
+
+def test_a_nationwide_flag_no_longer_exists_on_map_water(tmp_path, monkeypatch):
+    with pytest.raises(SystemExit):
+        run_cli(monkeypatch, "--nationwide", "--start", "2024-01-01", "--end", "2024-03-01", "--out", str(tmp_path))
