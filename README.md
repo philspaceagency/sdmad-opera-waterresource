@@ -109,9 +109,11 @@ Under `outputs/maps` (the `OUT` setting):
 |---|---|
 | `areas.csv` | one row per site, date and pass direction: water area (km2), the area the terrain safeguard removed, the observed area |
 | `<site>/frequency.tif` | % of the valid observations on which each pixel was water (255 = never observed). With both directions: the **minimum** of the two directions' frequencies |
+| `<site>/philsa_multimodal-surfacewaterfreq-frequency_YYYYMM-YYYYMM_v0.1.0_r01_surfacewaterfreq.png` | picture of that frequency (viridis, never-observed pixels transparent); the months are those of the first and last pass in the composite |
 | `<site>/frequency_ascending.tif`, `frequency_descending.tif` | the per-direction frequencies, when both directions were observed |
 | `<site>/n_obs.tif` | number of valid observations per pixel (both directions) |
-| `<site>/<date>_<orbit>_water.tif`, `_flags.tif`, `_prob.tif` | per-date masks (`WRITE`; `map_nationwide.py` writes none unless `--write` is given). `flags`: 0 land, 1 water, 2 the model said water but the slope is steeper than `MAX_SLOPE_DEG` (25 deg): removed, listed for review |
+| `<site>/philsa_multimodal-surfacewater-weekly_YYYYMMDD_v0.1.0_r01_surfacewater.tif` | water mask of one pass (0 land, 1 water); `YYYYMMDD` = local solar day. Per-date files are written with `WRITE` (`map_nationwide.py`: none unless `--write`) |
+| `<site>/..._r01_flags.tif`, `..._r01_preview.png` | 0 land, 1 water, 2 the model said water but the slope is steeper than `MAX_SLOPE_DEG` (25 deg: removed, listed for review); a colour picture of the mask (blue water, orange removed, grey no data). `..._surfacewaterprob.tif` (probability) only on request |
 | `failures.csv` | sites that failed (no pass covers them, a read error) with the reason |
 | `index.geojson` | nationwide only: every tile with status, scenes, mean / max area |
 
@@ -265,3 +267,9 @@ retraining on the real data.
   `frequency_descending.tif`: a streak that is bright in only one of them is shadow.
 - The hard-negative thresholds and the 25 deg safeguard are untuned defaults. A reservoir with steep banks and no steep training site will still be a weak case.
 - A nationwide run is a long job (one Sentinel-1 read per tile, date and direction): try a region first (`--bbox`), and keep `PRESCREEN` on.
+
+## Output file names
+
+Set in `ai_water/naming.py`: `philsa_multimodal-surfacewater-weekly_YYYYMMDD_v<version>_<revision>_<kind>`. Version `0.1.0` and revision `r01` are `MapConfig.version` / `MapConfig.revision`.
+The names carry no site and no pass direction (each site has its own folder), so two passes on the same local day would replace each other's files; the run logs a warning if that happens.
+The per-date files are per Sentinel-1 pass, not weekly composites; "weekly" is only the product-name token.

@@ -4,7 +4,9 @@ For every site and every Sentinel-1 date in a window, ascending and descending p
 cover) -> TerraMind -> water (`infer.infer_scene`), restricted to the site's outline when it has one (`aoi.aoi_mask`). Writes under
 `<out_dir>/<site>/`:
 
-    <date>_<orbit>_water.tif, ..._flags.tif ...   per scene (what `MapConfig.write` lists; () for none)
+    philsa_multimodal-surfacewater-weekly_<YYYYMMDD>_v0.1.0_r01_{surfacewater,flags}.tif and _preview.png   per scene (what
+                    `MapConfig.write` lists; () for none); see naming.py
+    philsa_multimodal-surfacewaterfreq-frequency_<YYYYMM>-<YYYYMM>_v0.1.0_r01_surfacewaterfreq.png   picture of frequency.tif
     frequency.tif   % of the valid observations on which each pixel was water (255 = never observed). With both pass directions
                     it is the pixel-wise MINIMUM of the two directions' frequencies: radar shadow sits on different slopes in
                     the two geometries, so a pixel that is 'water' in only one of them is shadow, not water
@@ -25,7 +27,7 @@ from dataclasses import dataclass, field
 import numpy as np
 import pandas as pd
 
-from . import acquire, aoi, infer, jrc, scene as sc, terrain as tr
+from . import acquire, aoi, infer, jrc, naming, scene as sc, terrain as tr
 
 AREA_COLUMNS = ["site", "label", "kind", "date", "orbit", "water_km2", "terrain_suppressed_km2", "valid_km2"]
 STATES = acquire.ORBIT_STATES
@@ -45,6 +47,8 @@ class MapConfig:
     threshold: float = 0.5                       # probability at which a pixel is water
     max_slope_deg: float = infer.MAX_SLOPE_DEG   # terrain safeguard, None = off (see infer.infer_scene)
     use_landcover: bool = True
+    version: str = naming.PRODUCT_VERSION        # product version and revision in the output file names
+    revision: str = naming.REVISION
     device: str = None
     cache_dir: str = "cache"
     scene: sc.SceneConfig = field(default_factory=sc.SceneConfig)
@@ -110,6 +114,14 @@ def composite_frequency(water_count, valid_count):
     return comb, [np.where(np.isnan(p), 255, np.round(p)).astype(np.uint8) for p in per]
 
 
+def frequency_rgb(freq):
+    """(h, w, 4) uint8 viridis picture of a frequency raster (0-100 %); never-observed pixels (255) are transparent."""
+    import matplotlib
+    rgba = (matplotlib.colormaps["viridis"](np.clip(freq, 0, 100) / 100.0) * 255).astype(np.uint8)
+    rgba[freq == 255] = 0
+    return rgba
+
+
 # ---------------------------------------------------------------------------------------- one site
 def map_site(site, model, cfg: MapConfig, log=print):
     """Process one site; returns its area rows (new ones only). Raises on failure (see `map_sites` for the isolated version)."""
@@ -145,7 +157,10 @@ def map_site(site, model, cfg: MapConfig, log=print):
         a = res.area_km2(res_m, inside)
         valid = res.valid if inside is None else (res.valid & inside)
         if cfg.write:
-            infer.write_result(sdir, stamp, res, gb, which=cfg.write, mask=inside)
+            if any(k.startswith(stamp + ":") and k != acquire.scene_key(stamp, orbit) for k in days):
+                log(f"  WARNING [{site.name}] {stamp}: another pass direction was mapped the same day; the file names carry no "
+                    "direction, so this scene replaces its outputs")
+            infer.write_result(sdir, stamp, res, gb, which=cfg.write, mask=inside, version=cfg.version, revision=cfg.revision)
         if cfg.composite:
             k = STATES.index(orbit)
             wc[k] += (res.water & valid).astype(np.uint16)
@@ -162,6 +177,8 @@ def map_site(site, model, cfg: MapConfig, log=print):
         comb, per = composite_frequency(wc, vc)
         sc.write_tif(os.path.join(sdir, "frequency.tif"), comb, gb, "uint8", 255)
         sc.write_tif(os.path.join(sdir, "n_obs.tif"), vc.sum(0), gb, "uint16", 0)
+        first, last = min(d.split(":")[0] for d in days), max(d.split(":")[0] for d in days)
+        infer.write_png(os.path.join(sdir, naming.frequency_name(first, last, cfg.version, cfg.revision)), frequency_rgb(comb))
         if (vc.reshape(len(STATES), -1).max(1) > 0).all():
             for state_name, p in zip(STATES, per):
                 sc.write_tif(os.path.join(sdir, f"frequency_{state_name}.tif"), p, gb, "uint8", 255)
