@@ -4,7 +4,7 @@
         --start 2024-01-01 --end 2024-03-31 --bbox 120.5 14.0 121.5 15.0       # --bbox / --limit-tiles: try a region first
 
 Omit --boundary to use Earth Engine's country boundary (--country). --prescreen drops tiles with (almost) no surface water using JRC.
-Output goes to --out (default outputs/nationwide): per tile <tile>/frequency.tif, n_obs.tif (and per-date masks with --write), plus
+Output goes to --out (default outputs/nationwide): per tile <tile>/frequency.tif, n_obs.tif (and the named per-date products with --write), plus
 areas.csv, failures.csv and index.geojson (every tile with its status and statistics). Re-running resumes; --restart reprocesses.
 Individual water bodies or a list of them are mapped with scripts/map_water.py or notebooks/ai_water_inference.ipynb instead.
 Earth Engine is needed (DEM, land cover): authenticate once with `earthengine authenticate` and pass --gee-project.

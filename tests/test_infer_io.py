@@ -36,6 +36,10 @@ def test_write_result_makes_geotiffs_named_by_date_and_orbit(tmp_path):
         transform = Affine(10, 0, 300000, 0, -10, 1650000)
         crs = "EPSG:32651"
     paths = infer.write_result(str(tmp_path), "2024-05-01", res, GB)
-    assert set(paths) == {"water", "flags", "prob"} and paths["water"].endswith("2024-05-01_ascending_water.tif")
+    assert set(paths) == {"water", "flags", "preview", "prob"}
+    assert paths["water"].endswith("philsa_multimodal-surfacewater-weekly_20240501_v0.1.0_r01_surfacewater.tif")
+    assert paths["flags"].endswith("_r01_flags.tif") and paths["preview"].endswith("_r01_preview.png") and paths["prob"].endswith("_surfacewaterprob.tif")
+    from PIL import Image
+    assert Image.open(paths["preview"]).size == (w, h)
     with rasterio.open(paths["prob"]) as r:
         assert r.shape == (h, w) and r.crs.to_string() == "EPSG:32651" and r.transform.a == 10

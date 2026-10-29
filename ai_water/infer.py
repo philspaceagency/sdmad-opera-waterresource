@@ -11,7 +11,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from . import acquire, features, scene as sc
+from . import acquire, features, naming, scene as sc
 
 FLAG_LAND, FLAG_WATER, FLAG_TERRAIN = 0, 1, 2
 MAX_SLOPE_DEG = 25.0
@@ -75,12 +75,29 @@ def iter_window(site, start, end, scene_cfg=None, cache_dir="cache", log=print, 
     return acquire.iter_scenes(site.bbox, site.crs, cfg.resolution_m, start, end, cfg.min_orbit_cover, cache_dir, log, skip_days)
 
 
-ALL_OUTPUTS = ("water", "flags", "prob")
+ALL_OUTPUTS = ("water", "flags", "preview", "prob")
+PREVIEW_COLORS = {"nodata": (40, 40, 40), "land": (214, 205, 187), "water": (43, 123, 186), "terrain": (240, 140, 40)}
 
 
-def write_result(out_dir, stamp, res: SceneResult, geobox, which=ALL_OUTPUTS, mask=None):
-    """GeoTIFFs <stamp>_<orbit>_<name>.tif for the names in `which`: water (0/1), flags (uint8), prob (float32).
-    `mask` (bool, same grid): everything outside it is written as land."""
+def preview_rgb(res: SceneResult, mask=None):
+    """(h, w, 3) uint8 picture: land beige, water blue, water removed by the terrain safeguard orange, no data / outside the outline grey."""
+    rgb = np.empty(res.water.shape + (3,), np.uint8)
+    rgb[:] = PREVIEW_COLORS["land"]
+    rgb[res.flags == FLAG_WATER] = PREVIEW_COLORS["water"]
+    rgb[res.flags == FLAG_TERRAIN] = PREVIEW_COLORS["terrain"]
+    rgb[~res.valid if mask is None else ~(res.valid & mask)] = PREVIEW_COLORS["nodata"]
+    return rgb
+
+
+def write_png(path, rgb):
+    import matplotlib.image as mpimg
+    mpimg.imsave(path, rgb)
+
+
+def write_result(out_dir, stamp, res: SceneResult, geobox, which=ALL_OUTPUTS, mask=None, version=naming.PRODUCT_VERSION,
+                 revision=naming.REVISION):
+    """Files named by `naming.scene_name` for the outputs in `which`: water (0/1 GeoTIFF), flags (uint8 GeoTIFF), preview (PNG),
+    prob (float32 GeoTIFF). `mask` (bool, same grid): everything outside it is written as land / grey. Returns {output: path}."""
     os.makedirs(out_dir, exist_ok=True)
     paths = {}
     inside = np.ones(res.water.shape, bool) if mask is None else mask
@@ -90,10 +107,13 @@ def write_result(out_dir, stamp, res: SceneResult, geobox, which=ALL_OUTPUTS, ma
         "prob": (np.where(inside, res.prob, 0.0).astype(np.float32), "float32", None),
     }
     for name in which:
-        if name not in arrays:
+        p = os.path.join(out_dir, naming.scene_name(stamp, name, version, revision)) if name in naming.SCENE_KINDS else None
+        if name == "preview":
+            write_png(p, preview_rgb(res, mask))
+        elif name in arrays:
+            arr, dtype, nodata = arrays[name]
+            sc.write_tif(p, arr, geobox, dtype, nodata)
+        else:
             continue
-        arr, dtype, nodata = arrays[name]
-        p = os.path.join(out_dir, f"{stamp}_{res.orbit}_{name}.tif")
-        sc.write_tif(p, arr, geobox, dtype, nodata)
         paths[name] = p
     return paths

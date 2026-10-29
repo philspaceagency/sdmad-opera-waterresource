@@ -10,7 +10,7 @@
     python scripts/map_water.py --model ... --aoi dams.geojson --multiple --start ... --end ...
     python scripts/map_water.py --model ... --aoi dams.geojson --names "Ambuklao Dam" "Binga Dam" ...
 
-Output goes to --out (default outputs/maps): per site <site>/frequency.tif, n_obs.tif and per-date masks, plus areas.csv, failures.csv.
+Output goes to --out (default outputs/maps): per site <site>/ the named per-date products (ai_water/naming.py), frequency.tif / .png, n_obs.tif, plus areas.csv, failures.csv.
 The whole country is a separate job: scripts/map_nationwide.py. Re-running resumes; --restart reprocesses.
 Earth Engine is needed for the terrain (DEM, land cover): authenticate once with `earthengine authenticate` and pass --gee-project.
 Both Sentinel-1 pass directions are used when the archive has them; frequency.tif is the minimum over the two directions.
@@ -41,7 +41,7 @@ def main():
     ap.add_argument("--gee-project", default=None)
     o = ap.add_argument_group("outputs")
     o.add_argument("--write", nargs="*", default=None, choices=list(infer.ALL_OUTPUTS),
-                   help="per-scene GeoTIFFs (default: water flags)")
+                   help="per-scene outputs (default: water flags)")
     o.add_argument("--threshold", type=float, default=0.5, help="water probability threshold (default 0.5)")
     o.add_argument("--max-slope", type=float, default=infer.MAX_SLOPE_DEG,
                    help="terrain safeguard: water on slopes steeper than this (deg) is removed and flagged; 0 = off")

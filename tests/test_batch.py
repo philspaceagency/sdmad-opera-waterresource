@@ -94,8 +94,8 @@ def test_two_sites_are_processed_and_areas_are_recorded(tmp_path, monkeypatch):
     a = res.areas
     assert (a["water_km2"] > 0).all() and (a["valid_km2"] > 6.0).all()                    # 256 x 256 px x 100 m2 = 6.55 km2
     assert a.loc[a.site == "beta", "kind"].iloc[0] == "lake" and a.loc[a.site == "alpha", "label"].iloc[0] == "Alpha"
-    assert (tmp_path / "alpha" / "2024-01-10_descending_water.tif").exists() and (tmp_path / "beta" / "frequency.tif").exists()
-    assert not (tmp_path / "alpha" / "2024-01-10_prob.tif").exists()                      # only what `write` asks for
+    assert (tmp_path / "alpha" / "philsa_multimodal-surfacewater-weekly_20240110_v0.1.0_r01_surfacewater.tif").exists() and (tmp_path / "beta" / "frequency.tif").exists()
+    assert (tmp_path / "alpha" / "philsa_multimodal-surfacewater-weekly_20240110_v0.1.0_r01_flags.tif").exists() and not list((tmp_path / "alpha").glob("*_surfacewaterprob.tif"))                      # only what `write` asks for
 
 
 def test_area_is_counted_inside_the_outline_only(tmp_path, monkeypatch):
@@ -104,7 +104,7 @@ def test_area_is_counted_inside_the_outline_only(tmp_path, monkeypatch):
     half = sbox(*lonlat_box(X0, Y1 - N * RES, X0 + N * RES / 2, Y1))
     clip = batch.map_sites([site("alpha", half)], FakeModel(), cfg(tmp_path / "clip"), log=lambda *_: None).areas
     assert (clip["water_km2"] < full["water_km2"]).all() and (clip["valid_km2"] < 0.55 * full["valid_km2"]).all()
-    with rasterio.open(tmp_path / "clip" / "alpha" / "2024-01-10_descending_water.tif") as r:
+    with rasterio.open(tmp_path / "clip" / "alpha" / "philsa_multimodal-surfacewater-weekly_20240110_v0.1.0_r01_surfacewater.tif") as r:
         assert r.read(1)[:, N // 2 + 3:].sum() == 0                                        # nothing outside the outline
 
 
@@ -170,7 +170,7 @@ def test_one_failing_site_does_not_stop_the_others(tmp_path, monkeypatch):
 def test_composite_can_be_turned_off(tmp_path, monkeypatch):
     FakeS1({"alpha": scenes(1)}).install(monkeypatch)
     batch.map_sites([site("alpha")], FakeModel(), cfg(tmp_path, composite=False, write=()), log=lambda *_: None)
-    assert not (tmp_path / "alpha" / "frequency.tif").exists() and not list((tmp_path / "alpha").glob("*_water.tif"))
+    assert not (tmp_path / "alpha" / "frequency.tif").exists() and not list((tmp_path / "alpha").glob("*_surfacewater.tif"))
     assert len(batch.read_areas(str(tmp_path))) == 3
 
 
@@ -214,3 +214,20 @@ def test_the_terrain_rule_is_reported_in_the_areas(tmp_path, monkeypatch):
                           log=lambda *_: None)
     row = res.areas.iloc[0]
     assert row["terrain_suppressed_km2"] > 0.5 and row["water_km2"] > 0.5                 # shadow removed, lake kept
+
+
+def test_the_frequency_picture_and_preview_are_written_with_the_product_names(tmp_path, monkeypatch):
+    FakeS1({"alpha": scenes(1)}).install(monkeypatch)
+    batch.map_sites([site("alpha")], FakeModel(), cfg(tmp_path, write=("water", "flags", "preview")), log=lambda *_: None)
+    d = tmp_path / "alpha"
+    assert (d / "philsa_multimodal-surfacewater-weekly_20240203_v0.1.0_r01_preview.png").exists()
+    assert (d / "philsa_multimodal-surfacewaterfreq-frequency_202401-202402_v0.1.0_r01_surfacewaterfreq.png").exists()
+
+
+def test_two_directions_on_the_same_day_are_warned_about(tmp_path, monkeypatch):
+    d = syn.make_terrain_scene((N, N), seed=5, orbit="descending")
+    a = syn.make_terrain_scene((N, N), seed=5, orbit="ascending")
+    FakeS1({"alpha": [("2024-01-10", "descending", d), ("2024-01-10", "ascending", a)]}).install(monkeypatch)
+    logs = []
+    batch.map_sites([site("alpha")], FakeModel(), cfg(tmp_path, terrain_source=syn.SyntheticTerrain(d["dem"])), log=logs.append)
+    assert any("same day" in m for m in logs)

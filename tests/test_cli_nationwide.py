@@ -70,5 +70,5 @@ def test_nationwide_from_a_boundary_file_with_a_region_and_a_cap(tmp_path, monke
             "--limit-tiles", "2", "--start", "2024-01-01", "--end", "2024-03-01", "--out", str(out))
     idx = json.load(open(out / "index.geojson"))["features"]
     assert len(idx) == 2 and all(f["properties"]["status"] == "ok" for f in idx)
-    assert not list(out.glob("tile_*/*_water.tif"))                     # nationwide writes no per-date masks by default
+    assert not list(out.glob("tile_*/*_surfacewater.tif"))                     # nationwide writes no per-date masks by default
     assert "n_tiles" in capsys.readouterr().out
