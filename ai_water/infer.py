@@ -75,7 +75,7 @@ def iter_window(site, start, end, scene_cfg=None, cache_dir="cache", log=print, 
     return acquire.iter_scenes(site.bbox, site.crs, cfg.resolution_m, start, end, cfg.min_orbit_cover, cache_dir, log, skip_days)
 
 
-ALL_OUTPUTS = ("water", "flags", "preview", "prob")
+ALL_OUTPUTS = ("water", "flags", "preview", "gpkg", "prob")
 PREVIEW_COLORS = {"nodata": (40, 40, 40), "land": (214, 205, 187), "water": (43, 123, 186), "terrain": (240, 140, 40)}
 
 
@@ -94,10 +94,30 @@ def write_png(path, rgb):
     mpimg.imsave(path, rgb)
 
 
+def write_gpkg(path, water, valid, geobox):
+    """GeoPackage with the water mask as polygons, layer `surfacewater`, one multipolygon per class and the integer field `water`
+    (1 = water, 0 = non-water). Pixels outside `valid` (no data, outside the outline) are in neither. Needs geopandas."""
+    try:
+        import geopandas as gpd
+    except ImportError as e:
+        raise ImportError("the GeoPackage output needs geopandas: pip install geopandas") from e
+    from rasterio.features import shapes
+    from shapely.geometry import MultiPolygon, shape
+    parts = {0: [], 1: []}
+    for geom, val in shapes(water.astype(np.uint8), mask=valid, transform=geobox.transform):
+        parts[int(val)].append(shape(geom))
+    rows = [(v, "water" if v else "non-water", MultiPolygon(p)) for v, p in sorted(parts.items(), reverse=True) if p]
+    gdf = gpd.GeoDataFrame({"water": [r[0] for r in rows], "class": [r[1] for r in rows]}, geometry=[r[2] for r in rows],
+                           crs=str(geobox.crs))
+    if os.path.exists(path):
+        os.remove(path)
+    gdf.to_file(path, driver="GPKG", layer="surfacewater")
+
+
 def write_result(out_dir, stamp, res: SceneResult, geobox, which=ALL_OUTPUTS, mask=None, version=naming.PRODUCT_VERSION,
                  revision=naming.REVISION):
     """Files named by `naming.scene_name` for the outputs in `which`: water (0/1 GeoTIFF), flags (uint8 GeoTIFF), preview (PNG),
-    prob (float32 GeoTIFF). `mask` (bool, same grid): everything outside it is written as land / grey. Returns {output: path}."""
+    gpkg (polygons, water 1 / non-water 0), prob (float32 GeoTIFF). `mask` (bool, same grid): everything outside it is written as land / grey. Returns {output: path}."""
     os.makedirs(out_dir, exist_ok=True)
     paths = {}
     inside = np.ones(res.water.shape, bool) if mask is None else mask
@@ -110,6 +130,8 @@ def write_result(out_dir, stamp, res: SceneResult, geobox, which=ALL_OUTPUTS, ma
         p = os.path.join(out_dir, naming.scene_name(stamp, name, version, revision)) if name in naming.SCENE_KINDS else None
         if name == "preview":
             write_png(p, preview_rgb(res, mask))
+        elif name == "gpkg":
+            write_gpkg(p, res.water & inside, res.valid & inside, geobox)
         elif name in arrays:
             arr, dtype, nodata = arrays[name]
             sc.write_tif(p, arr, geobox, dtype, nodata)

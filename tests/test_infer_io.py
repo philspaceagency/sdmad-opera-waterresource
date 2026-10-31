@@ -35,7 +35,7 @@ def test_write_result_makes_geotiffs_named_by_date_and_orbit(tmp_path):
     class GB:
         transform = Affine(10, 0, 300000, 0, -10, 1650000)
         crs = "EPSG:32651"
-    paths = infer.write_result(str(tmp_path), "2024-05-01", res, GB)
+    paths = infer.write_result(str(tmp_path), "2024-05-01", res, GB, which=("water", "flags", "preview", "prob"))
     assert set(paths) == {"water", "flags", "preview", "prob"}
     assert paths["water"].endswith("philsa_multimodal-surfacewater-weekly_20240501_v0.1.0_r01_surfacewater.tif")
     assert paths["flags"].endswith("_r01_flags.tif") and paths["preview"].endswith("_r01_preview.png") and paths["prob"].endswith("_surfacewaterprob.tif")

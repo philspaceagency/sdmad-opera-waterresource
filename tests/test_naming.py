@@ -2,7 +2,7 @@
 import numpy as np
 import pytest
 
-from ai_water import batch, naming
+from ai_water import naming
 
 
 def test_scene_names_follow_the_product_convention():
@@ -18,7 +18,5 @@ def test_frequency_name_spans_the_months_covered():
         "philsa_multimodal-surfacewaterfreq-frequency_202401-202403_v0.1.0_r01_surfacewaterfreq.png"
 
 
-def test_frequency_picture_hides_unobserved_pixels():
-    f = np.array([[0, 100, 255]], np.uint8)
-    rgba = batch.frequency_rgb(f)
-    assert rgba.shape == (1, 3, 4) and rgba[0, 2, 3] == 0 and rgba[0, 0, 3] == 255 and not np.array_equal(rgba[0, 0], rgba[0, 1])
+def test_gpkg_name():
+    assert naming.scene_name("2024-01-10", "gpkg") == "philsa_multimodal-surfacewater-weekly_20240110_v0.1.0_r01_surfacewater.gpkg"

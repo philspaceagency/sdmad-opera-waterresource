@@ -4,9 +4,9 @@ For every site and every Sentinel-1 date in a window, ascending and descending p
 cover) -> TerraMind -> water (`infer.infer_scene`), restricted to the site's outline when it has one (`aoi.aoi_mask`). Writes under
 `<out_dir>/<site>/`:
 
-    philsa_multimodal-surfacewater-weekly_<YYYYMMDD>_v0.1.0_r01_{surfacewater,flags}.tif and _preview.png   per scene (what
+    philsa_multimodal-surfacewater-weekly_<YYYYMMDD>_v0.1.0_r01_{surfacewater,flags}.tif, _surfacewater.gpkg and _preview.png   per scene (what
                     `MapConfig.write` lists; () for none); see naming.py
-    philsa_multimodal-surfacewaterfreq-frequency_<YYYYMM>-<YYYYMM>_v0.1.0_r01_surfacewaterfreq.png   picture of frequency.tif
+    philsa_multimodal-surfacewaterfreq-frequency_<YYYYMM>-<YYYYMM>_v0.1.0_r01_surfacewaterfreq.png   figure of frequency.tif (one per site, both directions combined; plots.py)
     frequency.tif   % of the valid observations on which each pixel was water (255 = never observed). With both pass directions
                     it is the pixel-wise MINIMUM of the two directions' frequencies: radar shadow sits on different slopes in
                     the two geometries, so a pixel that is 'water' in only one of them is shadow, not water
@@ -27,7 +27,7 @@ from dataclasses import dataclass, field
 import numpy as np
 import pandas as pd
 
-from . import acquire, aoi, infer, jrc, naming, scene as sc, terrain as tr
+from . import acquire, aoi, infer, jrc, naming, plots, scene as sc, terrain as tr
 
 AREA_COLUMNS = ["site", "label", "kind", "date", "orbit", "water_km2", "terrain_suppressed_km2", "valid_km2"]
 STATES = acquire.ORBIT_STATES
@@ -38,7 +38,7 @@ class MapConfig:
     start: str = "2024-01-01"
     end: str = "2024-12-31"
     out_dir: str = "outputs/maps"
-    write: tuple = ("water", "flags")            # per-scene GeoTIFFs: any of water, flags, prob; () = none
+    write: tuple = ("water", "flags", "preview")   # per-scene outputs: any of water, flags, preview, gpkg, prob; () = none
     composite: bool = True                       # frequency*.tif / n_obs.tif per site
     resume: bool = True                          # skip scenes already done
     stop_on_error: bool = False                  # False: record the failure and go on with the next site
@@ -114,14 +114,6 @@ def composite_frequency(water_count, valid_count):
     return comb, [np.where(np.isnan(p), 255, np.round(p)).astype(np.uint8) for p in per]
 
 
-def frequency_rgb(freq):
-    """(h, w, 4) uint8 viridis picture of a frequency raster (0-100 %); never-observed pixels (255) are transparent."""
-    import matplotlib
-    rgba = (matplotlib.colormaps["viridis"](np.clip(freq, 0, 100) / 100.0) * 255).astype(np.uint8)
-    rgba[freq == 255] = 0
-    return rgba
-
-
 # ---------------------------------------------------------------------------------------- one site
 def map_site(site, model, cfg: MapConfig, log=print):
     """Process one site; returns its area rows (new ones only). Raises on failure (see `map_sites` for the isolated version)."""
@@ -178,7 +170,10 @@ def map_site(site, model, cfg: MapConfig, log=print):
         sc.write_tif(os.path.join(sdir, "frequency.tif"), comb, gb, "uint8", 255)
         sc.write_tif(os.path.join(sdir, "n_obs.tif"), vc.sum(0), gb, "uint16", 0)
         first, last = min(d.split(":")[0] for d in days), max(d.split(":")[0] for d in days)
-        infer.write_png(os.path.join(sdir, naming.frequency_name(first, last, cfg.version, cfg.revision)), frequency_rgb(comb))
+        states = sorted({d.split(":")[1] for d in days})
+        plots.frequency_figure(os.path.join(sdir, naming.frequency_name(first, last, cfg.version, cfg.revision)), comb, gb, site.label,
+                               f"Sentinel-1 {' + '.join(states)} \u00b7 {first} to {last} \u00b7 {len(days)} passes \u00b7 {site.kind}",
+                               f"ai_water v{cfg.version} {cfg.revision}")
         if (vc.reshape(len(STATES), -1).max(1) > 0).all():
             for state_name, p in zip(STATES, per):
                 sc.write_tif(os.path.join(sdir, f"frequency_{state_name}.tif"), p, gb, "uint8", 255)

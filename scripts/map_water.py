@@ -24,6 +24,14 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from ai_water import batch, infer, jrc, scene, sites  # noqa: E402
 
 
+def _has_geopandas():
+    try:
+        import geopandas  # noqa: F401
+        return True
+    except ImportError:
+        return False
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--model", default="models/terramind_water_decoder.pt", help="checkpoint (small or full)")
@@ -41,7 +49,7 @@ def main():
     ap.add_argument("--gee-project", default=None)
     o = ap.add_argument_group("outputs")
     o.add_argument("--write", nargs="*", default=None, choices=list(infer.ALL_OUTPUTS),
-                   help="per-scene outputs (default: water flags)")
+                   help="per-scene outputs (default: water flags preview, and gpkg when geopandas is installed)")
     o.add_argument("--threshold", type=float, default=0.5, help="water probability threshold (default 0.5)")
     o.add_argument("--max-slope", type=float, default=infer.MAX_SLOPE_DEG,
                    help="terrain safeguard: water on slopes steeper than this (deg) is removed and flagged; 0 = off")
@@ -58,7 +66,7 @@ def main():
     except Exception as e:                                          # noqa: BLE001
         sys.exit(f"error: Earth Engine could not be initialised ({e.__class__.__name__}: {e}). It supplies the DEM and land cover: "
                  "run `earthengine authenticate` once and pass --gee-project <your project>.")
-    write = tuple(a.write) if a.write is not None else ("water", "flags")
+    write = tuple(a.write) if a.write is not None else ("water", "flags", "preview") + (("gpkg",) if _has_geopandas() else ())
     cfg = batch.MapConfig(start=a.start, end=a.end, out_dir=a.out, write=write, composite=not a.no_composite, resume=not a.restart,
                           stop_on_error=a.stop_on_error, cache_dir=a.cache, device=None, threshold=a.threshold,
                           max_slope_deg=a.max_slope or None, use_landcover=not a.no_landcover, scene=scene.SceneConfig())
