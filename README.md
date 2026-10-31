@@ -109,10 +109,11 @@ Under `outputs/maps` (the `OUT` setting):
 |---|---|
 | `areas.csv` | one row per site, date and pass direction: water area (km2), the area the terrain safeguard removed, the observed area |
 | `<site>/frequency.tif` | % of the valid observations on which each pixel was water (255 = never observed). With both directions: the **minimum** of the two directions' frequencies |
-| `<site>/philsa_multimodal-surfacewaterfreq-frequency_YYYYMM-YYYYMM_v0.1.0_r01_surfacewaterfreq.png` | picture of that frequency (viridis, never-observed pixels transparent); the months are those of the first and last pass in the composite |
+| `<site>/philsa_multimodal-surfacewaterfreq-frequency_YYYYMM-YYYYMM_v0.1.0_r01_surfacewaterfreq.png` | the **water-frequency figure**, one per water body, ascending and descending combined (the minimum of the two): white = never water, five blue classes (<=5, 5-20, 20-50, 50-80, 80-100 %), legend, scale bar, north arrow, cropped to the observed area (`plots.py`) |
 | `<site>/frequency_ascending.tif`, `frequency_descending.tif` | the per-direction frequencies, when both directions were observed |
 | `<site>/n_obs.tif` | number of valid observations per pixel (both directions) |
 | `<site>/philsa_multimodal-surfacewater-weekly_YYYYMMDD_v0.1.0_r01_surfacewater.tif` | water mask of one pass (0 land, 1 water); `YYYYMMDD` = local solar day. Per-date files are written with `WRITE` (`map_nationwide.py`: none unless `--write`) |
+| `<site>/philsa_multimodal-surfacewater-weekly_YYYYMMDD_v0.1.0_r01_surfacewater.gpkg` | the same mask as polygons (layer `surfacewater`, field `water`: **1 water, 0 non-water**; no-data and outside-outline pixels are in neither). Needs `geopandas` + `pyogrio`; on in the notebook, in `map_water.py` when installed |
 | `<site>/..._r01_flags.tif`, `..._r01_preview.png` | 0 land, 1 water, 2 the model said water but the slope is steeper than `MAX_SLOPE_DEG` (25 deg: removed, listed for review); a colour picture of the mask (blue water, orange removed, grey no data). `..._surfacewaterprob.tif` (probability) only on request |
 | `failures.csv` | sites that failed (no pass covers them, a read error) with the reason |
 | `index.geojson` | nationwide only: every tile with status, scenes, mean / max area |

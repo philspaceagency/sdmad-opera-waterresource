@@ -11,7 +11,10 @@ planetary-computer
 odc-stac
 rasterio
 # optional: GeoPackage / Shapefile / KML outlines for the water bodies to map (GeoJSON needs nothing extra)
+# GeoPackage output of the water mask (and GPKG/SHP/KML outlines)
+# pandas needs nothing extra; install both:
 # geopandas
+# pyogrio
 pyproj
 affine
 # JRC labels (Google Earth Engine; run `earthengine authenticate` once)
